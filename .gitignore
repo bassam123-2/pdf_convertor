@@ -2,3 +2,4 @@ dist/PDFTool-Setup-1.0.0.exe
 __pycache__/
 tests/corpus/_quality/
 .extract_cache/
+output_preview/
