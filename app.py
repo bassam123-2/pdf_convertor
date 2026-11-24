@@ -742,56 +742,6 @@ def _render_word() -> None:
             help="اترك الحقل فارغاً إذا كان الملف يُفتح من غير كلمة مرور.",
         )
         st.markdown('<div class="section-label">قبل التحويل</div>', unsafe_allow_html=True)
-        direction = st.radio(
-            "اللغة والاتجاه",
-            options=("auto", "rtl", "ltr"),
-            format_func=lambda item: {
-                "auto": "تلقائي / مختلط",
-                "rtl": "عربي - من اليمين لليسار",
-                "ltr": "إنجليزي - من اليسار لليمين",
-            }[item],
-            horizontal=True,
-            key="word_direction",
-            help="تلقائي يميّز العربي من الإنجليزي داخل الملف. عربي يُلزم اليمين. إنجليزي يُلزم اليسار.",
-        )
-        preserve = st.checkbox(
-            "الحفاظ على الصفحة الأولى / الغلاف",
-            value=False,
-            key="word_preserve",
-            help="الصفحة الأولى تبقى صورة كاملة، بلا هيدر ولا فوتر ولا إعادة سطر.",
-        )
-        lock_header = st.checkbox(
-            "تثبيت الهيدر",
-            value=True,
-            key="word_lock_header",
-            help="شريط الرأس بعرض الصفحة، بارتفاع ثابت، ومن غير خط زائد تحته.",
-        )
-        lock_footer = st.checkbox(
-            "تثبيت الفوتر",
-            value=True,
-            key="word_lock_footer",
-            help="مسافة ثابتة عن حافة الصفحة، ورقم الصفحة مقابل النص الجاري.",
-        )
-        page_spec = st.text_input(
-            "نطاق الصفحات",
-            value="",
-            key="word_pages",
-            placeholder="كل الصفحات، أو 1-5، أو 3,4,7",
-            help="اتركه فارغاً لتحويل كل الصفحات.",
-        )
-        merge = st.checkbox(
-            "دمج الأسطر في فقرات متصلة",
-            value=True,
-            key="word_merge",
-            help="الأسطر المتتالية تصبح فقرة واحدة. أوقفه إذا كان كل سطر عنصراً مستقلاً.",
-        )
-        tables_mode = st.radio(
-            "الجداول والرسوم",
-            options=("editable", "visual"),
-            format_func=lambda item: "جدول قابل للتعديل" if item == "editable" else "كتلة بصرية ثابتة",
-            horizontal=True,
-            key="word_tables",
-        )
         layout_mode = st.radio(
             "شكل ملف الوورد",
             options=("editable", "faithful"),
@@ -806,6 +756,60 @@ def _render_word() -> None:
                 "مطابق للشكل: كل سطر في مكانه بالضبط فوق صورة الصفحة، لكن التعديل عليه صعب."
             ),
         )
+        page_spec = st.text_input(
+            "نطاق الصفحات",
+            value="",
+            key="word_pages",
+            placeholder="كل الصفحات، أو 1-5، أو 3,4,7",
+            help="اتركه فارغاً لتحويل كل الصفحات.",
+        )
+        # Everything else has a default that suits almost every file, so it
+        # waits under one closed section instead of crowding the page.
+        with st.expander("خيارات متقدمة", expanded=False):
+            st.caption("القيم الافتراضية تناسب أغلب الملفات. غيّرها فقط إذا ظهرت مشكلة في ملف معيّن.")
+            direction = st.radio(
+                "اللغة والاتجاه",
+                options=("auto", "rtl", "ltr"),
+                format_func=lambda item: {
+                    "auto": "تلقائي / مختلط",
+                    "rtl": "عربي - من اليمين لليسار",
+                    "ltr": "إنجليزي - من اليسار لليمين",
+                }[item],
+                horizontal=True,
+                key="word_direction",
+                help="تلقائي يميّز العربي من الإنجليزي داخل الملف. عربي يُلزم اليمين. إنجليزي يُلزم اليسار.",
+            )
+            tables_mode = st.radio(
+                "الجداول والرسوم",
+                options=("editable", "visual"),
+                format_func=lambda item: "جدول قابل للتعديل" if item == "editable" else "كتلة بصرية ثابتة",
+                horizontal=True,
+                key="word_tables",
+            )
+            merge = st.checkbox(
+                "دمج الأسطر في فقرات متصلة",
+                value=True,
+                key="word_merge",
+                help="الأسطر المتتالية تصبح فقرة واحدة. أوقفه إذا كان كل سطر عنصراً مستقلاً.",
+            )
+            preserve = st.checkbox(
+                "الحفاظ على الصفحة الأولى / الغلاف كصورة",
+                value=False,
+                key="word_preserve",
+                help="الصفحة الأولى تبقى صورة كاملة، بلا هيدر ولا فوتر ولا إعادة سطر.",
+            )
+            lock_header = st.checkbox(
+                "تثبيت الهيدر",
+                value=True,
+                key="word_lock_header",
+                help="شريط الرأس بعرض الصفحة، بارتفاع ثابت، ومن غير خط زائد تحته.",
+            )
+            lock_footer = st.checkbox(
+                "تثبيت الفوتر",
+                value=True,
+                key="word_lock_footer",
+                help="مسافة ثابتة عن حافة الصفحة، ورقم الصفحة مقابل النص الجاري.",
+            )
         if st.button(
             "تحويل إلى وورد",
             key="word_convert",

@@ -1215,16 +1215,49 @@ def _continues_paragraph(previous: _Line, line: _Line) -> bool:
 
 
 def _separate_overlapping_atoms(atoms: list[_Atom]) -> list[_Atom]:
-    """Drop a glyph that sits inside another glyph and repeats its letters."""
+    """
+    Drop a glyph that sits inside another glyph and repeats its letters.
+
+    Glyphs are filed in a grid of cells by line and by the x range they
+    cover, so each glyph is only compared with glyphs on its own line that
+    it touches. The result is the same as comparing every pair.
+    """
     ordered = sorted(atoms, key=lambda atom: (round(atom.origin_y, 1), -atom.x1))
     kept: list[_Atom] = []
+    dropped: set[int] = set()
+    cell_x, cell_y = 12.0, 6.0
+    grid: dict[tuple[int, int], list[_Atom]] = {}
+
+    def cells(atom: _Atom):
+        gy = int(atom.origin_y // cell_y)
+        for gx in range(int(atom.x0 // cell_x), int(atom.x1 // cell_x) + 1):
+            yield gx, gy
+
     for atom in ordered:
         if not atom.text.strip():
+            # A space is kept, and filed too: a letter drawn over it removes it.
+            atom._order = len(kept)
             kept.append(atom)
+            for key in cells(atom):
+                grid.setdefault(key, []).append(atom)
             continue
         swallowed = False
-        for other in list(kept):
-            if abs(atom.origin_y - other.origin_y) > max(2.4, atom.size * 0.35):
+        seen: set[int] = set()
+        reach = max(2.4, atom.size * 0.35)
+        rows = range(int((atom.origin_y - reach) // cell_y), int((atom.origin_y + reach) // cell_y) + 1)
+        columns = range(int(atom.x0 // cell_x), int(atom.x1 // cell_x) + 1)
+        candidates = []
+        for gy in rows:
+            for gx in columns:
+                for other in grid.get((gx, gy), ()):
+                    if id(other) in seen or id(other) in dropped:
+                        continue
+                    seen.add(id(other))
+                    candidates.append(other)
+        # Earlier glyphs first, as in a plain scan of the kept list.
+        candidates.sort(key=lambda other: other._order)
+        for other in candidates:
+            if abs(atom.origin_y - other.origin_y) > reach:
                 continue
             overlap = min(atom.x1, other.x1) - max(atom.x0, other.x0)
             narrow = max(0.1, min(atom.x1 - atom.x0, other.x1 - other.x0))
@@ -1235,13 +1268,16 @@ def _separate_overlapping_atoms(atoms: list[_Atom]) -> list[_Atom]:
             if shorter not in longer and longer not in shorter:
                 continue
             if len(shorter) > len(longer):
-                kept.remove(other)
+                dropped.add(id(other))
                 continue
             swallowed = True
             break
         if not swallowed:
+            atom._order = len(kept)
             kept.append(atom)
-    return kept
+            for key in cells(atom):
+                grid.setdefault(key, []).append(atom)
+    return [atom for atom in kept if id(atom) not in dropped]
 
 
 def _join_segment(lines: list[_Line]) -> list[TextBlock]:
@@ -5902,7 +5938,7 @@ def _capture_flow(
     digital_layer = letters >= 40 or (letters >= 3 and not _page_has_images(page))
     if digital_layer and not (page_number == 1 and options.preserve_first_page):
         try:
-            payload = faithful.read_page(page, repair)
+            payload = faithful.read_page(page, repair, background=False)
         except Exception as exc:
             payload = None
             notes.append(f"Page {page_number}: the flowing reader failed ({exc}); the ordinary reader was used.")

@@ -243,13 +243,46 @@ def _write_blocks(host, blocks: list, width_pt: float, height_pt: float, documen
             conv._add_table(host, block, int(width_pt * 12700), height_pt)
             counts["tables"] = counts.get("tables", 0) + 1
         elif kind == "image":
-            if getattr(block, "data", None):
-                conv._add_image(host, block, int(width_pt * 12700), height_pt)
+            if getattr(block, "data", None) and write_image(host, block, width_pt, height_pt):
                 counts["images"] = counts.get("images", 0) + 1
         else:
             write_paragraph(host, block, conv)
             key = "headings" if block.kind == "heading" else "paragraphs"
             counts[key] = counts.get(key, 0) + 1
+
+
+def write_image(host, block, width_pt: float, height_pt: float) -> bool:
+    """
+    One picture as an inline picture in its own paragraph.
+
+    It keeps its PDF size, shrunk only to fit the column (or the page) it
+    sits in, and is placed left, centred or right as it was in the PDF.
+    Inline, it moves with the text around it and works the same inside a
+    table cell as on the page.
+    """
+    from io import BytesIO
+
+    from docx.shared import Emu
+
+    width = float(block.width or (_box(block)[2] - _box(block)[0]))
+    height = float(block.height or (_box(block)[3] - _box(block)[1]))
+    if width <= 0 or height <= 0:
+        return False
+    scale = min(1.0, max(1.0, width_pt) / width, max(1.0, height_pt * 0.85) / height)
+    width, height = width * scale, height * scale
+    if width < 8 or height < 8:
+        return False
+    paragraph = host.add_paragraph()
+    paragraph.style = host.styles["Normal"]
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    paragraph.paragraph_format.space_before = Pt(max(0.0, float(getattr(block, "gap_before", 0.0) or 0.0)))
+    paragraph.paragraph_format.space_after = Pt(0)
+    try:
+        paragraph.add_run().add_picture(BytesIO(block.data), width=Emu(int(width * 12700)))
+    except Exception:
+        paragraph._p.getparent().remove(paragraph._p)
+        return False
+    return True
 
 
 def conv_merge(blocks: list) -> list:

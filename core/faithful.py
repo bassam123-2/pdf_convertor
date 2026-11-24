@@ -452,36 +452,48 @@ def _dedupe_fake_bold(atoms: list[_Atom]) -> list[_Atom]:
 
     Fake bold is often stroke+fill or a second draw shifted by a fraction of
     a point. The survivor is marked bold. General: no file-specific rules.
+
+    Glyphs are looked up in a grid of small cells, so each glyph is compared
+    only with the glyphs near it. Comparing every pair took seconds on a
+    dense page.
     """
     ordered = sorted(atoms, key=lambda atom: (round(atom.origin_y, 1), atom.x0, -((atom.x1 - atom.x0))))
     kept: list[_Atom] = []
+    cell = 8.0
+    grid: dict[tuple[int, int], list[_Atom]] = {}
     for atom in ordered:
         text = atom.text.strip()
         if not text:
             kept.append(atom)
             continue
+        cx = (atom.x0 + atom.x1) / 2.0
+        gx, gy = int(cx // cell), int(atom.origin_y // cell)
         duplicate = False
-        for other in kept:
-            if not other.text.strip():
-                continue
-            if other.text.strip() != text:
-                continue
-            if abs(atom.origin_y - other.origin_y) > max(1.5, atom.size * 0.25):
-                continue
-            # An overprint copy is shifted by a fraction of its own glyph. The
-            # next letter of a double letter (the second l of "all") is a whole
-            # glyph further on, however narrow the glyph is.
-            dx = abs(((atom.x0 + atom.x1) / 2.0) - ((other.x0 + other.x1) / 2.0))
-            glyph = max(0.5, min(atom.x1 - atom.x0, other.x1 - other.x0))
-            if dx > min(max(2.5, atom.size * 0.35), glyph * 0.5):
-                continue
-            # Same word, nearly the same place.
-            other.bold = True
-            other.flags = int(other.flags) | 16
-            duplicate = True
-            break
+        for nx in (gx - 1, gx, gx + 1):
+            for ny in (gy - 1, gy, gy + 1):
+                for other in grid.get((nx, ny), ()):
+                    if other.text.strip() != text:
+                        continue
+                    if abs(atom.origin_y - other.origin_y) > max(1.5, atom.size * 0.25):
+                        continue
+                    # An overprint copy is shifted by a fraction of its own glyph.
+                    # The next letter of a double letter (the second l of "all")
+                    # is a whole glyph further on, however narrow the glyph is.
+                    dx = abs(cx - ((other.x0 + other.x1) / 2.0))
+                    glyph = max(0.5, min(atom.x1 - atom.x0, other.x1 - other.x0))
+                    if dx > min(max(2.5, atom.size * 0.35), glyph * 0.5):
+                        continue
+                    other.bold = True
+                    other.flags = int(other.flags) | 16
+                    duplicate = True
+                    break
+                if duplicate:
+                    break
+            if duplicate:
+                break
         if not duplicate:
             kept.append(atom)
+            grid.setdefault((gx, gy), []).append(atom)
     return kept
 
 
@@ -1039,7 +1051,7 @@ def picture_page(page: fitz.Page, note: str = "") -> FaithfulPage:
     return payload
 
 
-def read_page(page: fitz.Page, repair: str = "") -> FaithfulPage:
+def read_page(page: fitz.Page, repair: str = "", background: bool = True) -> FaithfulPage:
     """
     Read one PDF page into a background picture and text lines.
 
@@ -1107,6 +1119,13 @@ def read_page(page: fitz.Page, repair: str = "") -> FaithfulPage:
         payload.notes.append(
             f"Page {number}: text set at an angle or drawn as an outline stays in the page picture."
         )
+    if not background:
+        # The flowing layout writes no page picture; skip drawing one.
+        _strip_page_labels(payload)
+        payload.links = _read_links(page)
+        payload.missing_fonts = _missing_fonts(page)
+        _enrich_tables_and_charts(page, payload)
+        return payload
     try:
         if other or kept:
             # Some text stays in the picture, so only the written glyphs are removed.
