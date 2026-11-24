@@ -3243,7 +3243,7 @@ def _cover_logos(page: fitz.Page, atoms: list[_Atom], background_xrefs: set[int]
         if width < 28 or height < 28 or area > page_area * 0.28 or area < page_area * 0.004:
             continue
         try:
-            data = page.parent.extract_image(xref).get("image")
+            data = _image_bytes(page, xref)
         except Exception:
             data = None
         if not data or _pale_image(data):
@@ -3640,7 +3640,7 @@ def _figures(page: fitz.Page, atoms: list[_Atom], background_xrefs: set[int]) ->
         if area > page_area * 0.92 and body_text:
             continue
         try:
-            data = page.parent.extract_image(xref).get("image")
+            data = _image_bytes(page, xref)
         except Exception:
             data = None
         if not data:
@@ -3650,6 +3650,40 @@ def _figures(page: fitz.Page, atoms: list[_Atom], background_xrefs: set[int]) ->
         seen.add(xref)
         figures.append(ImageBlock(tuple(float(value) for value in bbox), data, width, height))
     return figures
+
+
+def _image_bytes(page: fitz.Page, xref: int) -> bytes | None:
+    """
+    One embedded picture as file bytes, with its transparency.
+
+    A picture with a soft mask stores its see-through parts in the mask.
+    Taking the raw picture alone paints those parts black (a logo on a black
+    square). The mask is joined back on and the picture saved as PNG.
+    """
+    document = page.parent
+    smask = 0
+    try:
+        for entry in page.get_images(full=True):
+            if int(entry[0]) == int(xref):
+                smask = int(entry[1] or 0)
+                break
+    except Exception:
+        smask = 0
+    if smask:
+        try:
+            base = fitz.Pixmap(document, xref)
+            if base.alpha:
+                base = fitz.Pixmap(base, 0)
+            if base.colorspace is not None and base.colorspace.n not in (1, 3):
+                base = fitz.Pixmap(fitz.csRGB, base)
+            mask = fitz.Pixmap(document, smask)
+            return fitz.Pixmap(base, mask).tobytes("png")
+        except Exception:
+            pass
+    try:
+        return document.extract_image(xref).get("image")
+    except Exception:
+        return None
 
 
 def text_direction(text: str) -> str:
@@ -5967,8 +6001,11 @@ def _capture_flow(
         # read from the page picture, and that reading belongs in the
         # positioned layout. Deciding here also keeps the slow picture
         # reading to one pass per page.
-        notes.append(f"Page {page_number}: kept in the positioned layout (the font stores Arabic letters as Latin ones).")
-        return _positioned(fallback, page, plumber_page, background_xrefs, furniture, schema, page_number, notes, options, repair)
+        # Read with the ordinary reader, whatever the classifier chose: it
+        # takes the words from the page picture (OCR) and writes them as
+        # editable text. The faithful reader would leave them in the picture.
+        notes.append(f"Page {page_number}: read from the page picture (the font stores Arabic letters as Latin ones).")
+        return _positioned(_capture_page, page, plumber_page, background_xrefs, furniture, schema, page_number, notes, options, repair)
     if digital_layer and not (page_number == 1 and options.preserve_first_page):
         try:
             payload = faithful.read_page(page, repair, background=False)
