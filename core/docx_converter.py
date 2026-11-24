@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import contextvars
 import copy
+import functools
 import re
 import sys
 import unicodedata
@@ -141,6 +142,9 @@ class WordPage:
     # Faithful mode keeps the page here: a background picture and text lines.
     # None means the page is written by the flowing layout.
     faithful: object | None = None
+    # True when an editable page was read the earlier way and is written in
+    # positioned frames instead of flowing paragraphs.
+    frames: bool = False
 
 
 @dataclass
@@ -5918,9 +5922,15 @@ def _capture_flow(
     notes: list[str],
     options: WordOptions,
     repair: str = "",
+    fallback=None,
 ) -> WordPage:
     """
     Read one page for the flowing editable layout.
+
+    `fallback` is the reader earlier versions used for this page. A page
+    that cannot flow without loss goes to it, so it comes out exactly as it
+    did before: positioned editable frames (with OCR text when the font map
+    is broken) or the faithful layout.
 
     The faithful reader does the reading: it splits side-by-side columns at
     their rules, drops fake-bold copies and repairs broken Arabic glyphs. Its
@@ -5942,9 +5952,7 @@ def _capture_flow(
         # positioned layout. Deciding here also keeps the slow picture
         # reading to one pass per page.
         notes.append(f"Page {page_number}: kept in the positioned layout (the font stores Arabic letters as Latin ones).")
-        return _capture_faithful(
-            page, plumber_page, background_xrefs, furniture, schema, page_number, notes, options, repair
-        )
+        return _positioned(fallback, page, plumber_page, background_xrefs, furniture, schema, page_number, notes, options, repair)
     if digital_layer and not (page_number == 1 and options.preserve_first_page):
         try:
             payload = faithful.read_page(page, repair, background=False)
@@ -5962,10 +5970,16 @@ def _capture_flow(
             # Positioned layout for this page, so nothing that only the page
             # picture carries is lost and the page stays one page.
             notes.append(f"Page {page_number}: kept in the positioned layout ({why}).")
-            return _capture_faithful(
-                page, plumber_page, background_xrefs, furniture, schema, page_number, notes, options, repair
-            )
-    return _capture_page(page, plumber_page, background_xrefs, furniture, schema, page_number, notes, options, repair)
+            return _positioned(fallback, page, plumber_page, background_xrefs, furniture, schema, page_number, notes, options, repair)
+    return _positioned(fallback or _capture_page, page, plumber_page, background_xrefs, furniture, schema, page_number, notes, options, repair)
+
+
+def _positioned(reader, page, plumber_page, background_xrefs, furniture, schema, page_number, notes, options, repair) -> WordPage:
+    """Read a page the way earlier versions did; mark it to be written in frames."""
+    reader = reader or _capture_faithful
+    record = reader(page, plumber_page, background_xrefs, furniture, schema, page_number, notes, options, repair)
+    record.frames = True
+    return record
 
 
 def _remember_page(record: WordPage) -> dict:
@@ -6096,6 +6110,9 @@ def read_word_build(
                         # faithful only for their art (a logo, a ruled frame). A slide
                         # or a page whose text is drawn as outlines stays faithful.
                         reason = plan.reason if plan is not None else ""
+                        # How earlier versions read this page. A page the flowing
+                        # layout cannot take is read this way, unchanged.
+                        fallback = _capture_faithful if use_faithful else _capture_page
                         if (
                             use_faithful
                             and not faithful_mode
@@ -6107,7 +6124,7 @@ def read_word_build(
                         if use_faithful:
                             capture = _capture_faithful
                         elif getattr(options, "flow", True) and not faithful_mode and strategy != "scanned":
-                            capture = _capture_flow
+                            capture = functools.partial(_capture_flow, fallback=fallback)
                         else:
                             capture = _capture_page
                         record = capture(
@@ -6376,7 +6393,7 @@ def write_word_build(build: WordBuild, docx_path: str | Path) -> dict:
             else:
                 _add_page_break(word)
             signature = sign
-            if getattr(build.options, "flow", True):
+            if getattr(build.options, "flow", True) and not getattr(record, "frames", False):
                 from core.flow_layout import write_flow_page
 
                 write_flow_page(word, blocks, frame_w, frame_h, counts)

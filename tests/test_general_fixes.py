@@ -188,7 +188,9 @@ GUIDE = FILES / "competition_guide_ar.pdf"
 def test_broken_font_pages_stay_positioned_in_editable_mode():
     build = read_word_build(GUIDE, options=WordOptions(mode="editable", page_spec="2,9"))
     # Both pages store Arabic letters as Latin ones: no flowing text for them.
-    assert all(page.faithful is not None for page in build.pages)
+    # They are read the way earlier versions read them (OCR text in frames,
+    # or the faithful layout), not dropped into a page picture by the flow.
+    assert all(page.frames for page in build.pages)
 
 
 @pytest.mark.skipif(not RELATED.is_file(), reason="sample missing")
