@@ -193,6 +193,19 @@
       "mode": "faithful",
       "min_similarity": 0.35,
       "notes": "English|Arabic bordered two-column policy layout."
+    },
+    {
+      "id": "related_party_bilingual",
+      "file": "files/related_party_bilingual.pdf",
+      "producer": "Word (Ghostscript)",
+      "language": "ar+en",
+      "structure": ["two-column bilingual table", "numbered lists", "revision table", "cover page"],
+      "graphics": ["logo", "borders"],
+      "font_issues": ["lam-alef ligatures map to wrong code points", "fake bold overprint"],
+      "orientation": "portrait",
+      "mode": "faithful",
+      "min_similarity": 0.55,
+      "notes": "Real 9-page policy: English column left, Arabic column right on every page."
     }
   ],
   "missing_categories": [
