@@ -5936,6 +5936,15 @@ def _capture_flow(
     raw = _atoms_on_page(page)
     letters = sum(len(atom.text.strip()) for atom in raw)
     digital_layer = letters >= 40 or (letters >= 3 and not _page_has_images(page))
+    if digital_layer and _encoding_broken(page, raw):
+        # A font map that stores Arabic letters as Latin ones: the words are
+        # read from the page picture, and that reading belongs in the
+        # positioned layout. Deciding here also keeps the slow picture
+        # reading to one pass per page.
+        notes.append(f"Page {page_number}: kept in the positioned layout (the font stores Arabic letters as Latin ones).")
+        return _capture_faithful(
+            page, plumber_page, background_xrefs, furniture, schema, page_number, notes, options, repair
+        )
     if digital_layer and not (page_number == 1 and options.preserve_first_page):
         try:
             payload = faithful.read_page(page, repair, background=False)
@@ -5943,9 +5952,19 @@ def _capture_flow(
             payload = None
             notes.append(f"Page {page_number}: the flowing reader failed ({exc}); the ordinary reader was used.")
         if payload is not None and (payload.lines or payload.tables):
-            notes.extend(payload.notes)
-            blocks = blocks_from_faithful(page, payload)
-            return WordPage(page_number, blocks, width, height, kind="digital")
+            from core.flow_layout import page_flows_well
+
+            flows, why = page_flows_well(page, payload)
+            if flows:
+                notes.extend(payload.notes)
+                blocks = blocks_from_faithful(page, payload)
+                return WordPage(page_number, blocks, width, height, kind="digital")
+            # Positioned layout for this page, so nothing that only the page
+            # picture carries is lost and the page stays one page.
+            notes.append(f"Page {page_number}: kept in the positioned layout ({why}).")
+            return _capture_faithful(
+                page, plumber_page, background_xrefs, furniture, schema, page_number, notes, options, repair
+            )
     return _capture_page(page, plumber_page, background_xrefs, furniture, schema, page_number, notes, options, repair)
 
 

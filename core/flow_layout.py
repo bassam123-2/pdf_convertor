@@ -468,3 +468,47 @@ def _set_alignment(blocks: list, page_width: float) -> None:
         middle = (x0 + x1) / 2.0
         if abs(middle - (left + right) / 2.0) <= width * 0.06 and x0 - left > width * 0.08 and right - x1 > width * 0.08:
             block.align = "center"
+
+
+def page_flows_well(page, payload) -> tuple[bool, str]:
+    """
+    Whether a faithful reading can be written as flowing text without loss.
+
+    Flowing text has no page picture under it. A page whose glyphs could not
+    all be read as text (a broken font map), whose text is drawn at an angle
+    or as outlines, or that is mostly pictures and drawings, would lose what
+    only the picture carried, or turn into a long run of loose pictures.
+    Such a page keeps the positioned layout instead.
+    """
+    import fitz
+
+    from core.faithful import _visible_glyphs
+
+    glyphs = max(1, _visible_glyphs(page))
+    kept = int(getattr(payload, "kept_in_picture", 0) or 0)
+    if kept > max(3, glyphs * 0.02):
+        return False, f"{kept} of {glyphs} glyphs could only be kept in the page picture"
+    tokens = [t for line in payload.lines for t in (line.text or "").split() if re.search(r"[\u0600-\u06FF]", t)]
+    mixed = sum(1 for t in tokens if re.search(r"[A-Za-z|•¢´¦…]", t))
+    if len(tokens) >= 12 and mixed >= 5 and mixed / len(tokens) >= 0.04:
+        return False, f"{mixed} of {len(tokens)} Arabic words carry Latin letters or symbols (broken font map)"
+    if any("drawn as an outline" in note or "set at an angle" in note for note in payload.notes):
+        return False, "text at an angle or drawn as outlines"
+    if any(note.startswith("Chart/figure") and "overlapping text labels" in note for note in payload.notes):
+        return False, "a figure carries text labels"
+    area = float(page.rect.width * page.rect.height) or 1.0
+    pictures = 0
+    covered = 0.0
+    try:
+        infos = page.get_image_info() or []
+    except Exception:
+        infos = []
+    for info in infos:
+        rect = fitz.Rect(info.get("bbox") or (0, 0, 0, 0)) & page.rect
+        if rect.is_empty or rect.width < 12 or rect.height < 12 or rect.get_area() / area > 0.85:
+            continue
+        pictures += 1
+        covered += rect.get_area()
+    if pictures > 6 or covered / area > 0.45:
+        return False, f"{pictures} pictures cover {covered / area:.0%} of the page"
+    return True, ""

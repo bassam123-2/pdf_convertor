@@ -179,3 +179,30 @@ def test_side_by_side_columns_keep_printed_order(tmp_path):
     assert '<w:bidiVisual w:val="0"/>' in xml
     assert xml.index("English 0") < xml.index("عربي 0")
     assert xml.count("<w:tblLayout") == 1
+
+
+GUIDE = FILES / "competition_guide_ar.pdf"
+
+
+@pytest.mark.skipif(not GUIDE.is_file(), reason="sample missing")
+def test_broken_font_pages_stay_positioned_in_editable_mode():
+    build = read_word_build(GUIDE, options=WordOptions(mode="editable", page_spec="2,9"))
+    # Both pages store Arabic letters as Latin ones: no flowing text for them.
+    assert all(page.faithful is not None for page in build.pages)
+
+
+@pytest.mark.skipif(not RELATED.is_file(), reason="sample missing")
+def test_clean_pages_still_flow():
+    build = read_word_build(RELATED, options=WordOptions(mode="editable", page_spec="3"))
+    assert build.pages[0].faithful is None and build.pages[0].blocks
+
+
+def test_link_box_holds_no_visible_copy_of_the_address(tmp_path):
+    links = FILES / "links_sample.pdf"
+    if not links.is_file():
+        pytest.skip("sample missing")
+    out = tmp_path / "links.docx"
+    convert_arabic_pdf_to_docx(links, out, options=WordOptions(mode="faithful"))
+    with zipfile.ZipFile(out) as package:
+        xml = package.read("word/document.xml").decode("utf-8")
+    assert ">Page " not in xml

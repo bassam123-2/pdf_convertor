@@ -1857,6 +1857,10 @@ def _write_link(host, link: FaithfulLink, scale: float, off_x: float, off_y: flo
         label = link.target
         target = link.target
     tip = escape(label[:120])
+    # The PDF already prints the link's words under this box. The box only
+    # needs to be clickable, so it holds blank space as wide as the link,
+    # not a second, visible copy of the address or of "Page N".
+    filler = "\u00a0" * max(1, int(width / 2.5))
     # Build a text-box run, then attach a real relationship hyperlink when URI.
     xml = (
         f"<w:r {_NAMESPACES}><w:rPr><w:noProof/></w:rPr><w:drawing>"
@@ -1874,8 +1878,8 @@ def _write_link(host, link: FaithfulLink, scale: float, off_x: float, off_y: flo
         '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr>'
         "<wps:txbx><w:txbxContent><w:p><w:pPr>"
         '<w:spacing w:before="0" w:after="0" w:line="40" w:lineRule="exact"/>'
-        f"</w:pPr><w:r><w:rPr><w:noProof/><w:color w:val=\"0563C1\"/><w:u w:val=\"single\"/>"
-        f"</w:rPr><w:t>{escape(label[:80])}</w:t></w:r></w:p></w:txbxContent></wps:txbx>"
+        f"</w:pPr><w:r><w:rPr><w:noProof/><w:sz w:val=\"20\"/><w:szCs w:val=\"20\"/>"
+        f"</w:rPr><w:t xml:space=\"preserve\">{filler}</w:t></w:r></w:p></w:txbxContent></wps:txbx>"
         '<wps:bodyPr rot="0" vert="horz" wrap="none" lIns="0" tIns="0" rIns="0" bIns="0" '
         'anchor="t" anchorCtr="0"><a:noAutofit/></wps:bodyPr>'
         "</wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"

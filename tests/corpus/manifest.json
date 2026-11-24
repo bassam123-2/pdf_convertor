@@ -206,6 +206,19 @@
       "mode": "faithful",
       "min_similarity": 0.55,
       "notes": "Real 9-page policy: English column left, Arabic column right on every page."
+    },
+    {
+      "id": "competition_guide_ar",
+      "file": "files/competition_guide_ar.pdf",
+      "producer": "macOS Quartz PDFContext",
+      "language": "ar",
+      "structure": ["contents page", "flowing text", "infographics", "headers and footers"],
+      "graphics": ["logos", "icons", "vector art"],
+      "font_issues": ["Sakkal Majalla map stores Arabic letters as Latin letters and symbols"],
+      "orientation": "portrait",
+      "mode": "editable",
+      "min_similarity": 0.5,
+      "notes": "39-page Arabic compliance guide. Editable mode once wrote 166 pages: pages whose text only the page picture carries must stay positioned."
     }
   ],
   "missing_categories": [
