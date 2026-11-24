@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "defaults": {
+    "target_score": 97.0,
+    "fail_below": 85.0,
+    "preview_scale": 1.25,
+    "detail_scale": 2.0,
+    "weights": {
+      "visual": 0.45,
+      "placement": 0.35,
+      "content": 0.20
+    }
+  },
+  "document_types": {
+    "slides": {
+      "target_score": 95.0,
+      "fail_below": 80.0,
+      "weights": { "visual": 0.55, "placement": 0.25, "content": 0.20 }
+    },
+    "text_document": {
+      "target_score": 97.0,
+      "fail_below": 88.0,
+      "weights": { "visual": 0.35, "placement": 0.40, "content": 0.25 }
+    },
+    "table_heavy": {
+      "target_score": 94.0,
+      "fail_below": 82.0,
+      "weights": { "visual": 0.40, "placement": 0.35, "content": 0.25 }
+    },
+    "scanned": {
+      "target_score": 92.0,
+      "fail_below": 75.0,
+      "weights": { "visual": 0.70, "placement": 0.10, "content": 0.20 }
+    }
+  }
+}
