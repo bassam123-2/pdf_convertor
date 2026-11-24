@@ -58,6 +58,17 @@ from core.pdf_loader import close_document, iter_page_batches, open_document
 # that sit inside the same sentence.
 _ARABIC_FONT = "Traditional Arabic"
 _LATIN_FONT = "Arial"
+# One family for every run of the Word file, Arabic and Latin alike. Empty
+# keeps the PDF's own families. Set for the length of one write.
+_FONT = contextvars.ContextVar("pdf_tool_font", default="")
+
+
+def output_fonts() -> tuple[str, str]:
+    """The Latin and the Arabic family the Word file is written in."""
+    chosen = (_FONT.get() or "").strip()
+    if chosen:
+        return chosen, chosen
+    return _LATIN_FONT, _ARABIC_FONT
 
 # One PDF page is written as one Word section. These match the margins in
 # _start_section, in points, so a height estimate uses the same frame Word will.
@@ -110,6 +121,10 @@ class WordOptions:
     cancel: object | None = None
     # Parallel page readers (1 = sequential). Each worker opens its own PDF.
     workers: int = 1
+    # The family every run is written in (Arabic and Latin). Times New Roman
+    # ships with Windows and Office and has full Arabic, so the file looks the
+    # same on every machine. "" keeps each PDF font's own family.
+    font: str = "Times New Roman"
     # Editable mode only. True writes ordinary flowing paragraphs (columns as
     # borderless table cells); False pins every paragraph in a floating frame
     # at its PDF position, as earlier versions did.
@@ -3670,10 +3685,11 @@ def _set_run_font(run, size_pt: float, bold: bool, text: str | None = None) -> N
     if fonts is None:
         fonts = OxmlElement("w:rFonts")
         properties.append(fonts)
-    fonts.set(qn("w:ascii"), _LATIN_FONT)
-    fonts.set(qn("w:hAnsi"), _LATIN_FONT)
-    fonts.set(qn("w:cs"), _ARABIC_FONT)
-    fonts.set(qn("w:eastAsia"), _ARABIC_FONT)
+    latin_font, arabic_font = output_fonts()
+    fonts.set(qn("w:ascii"), latin_font)
+    fonts.set(qn("w:hAnsi"), latin_font)
+    fonts.set(qn("w:cs"), arabic_font)
+    fonts.set(qn("w:eastAsia"), arabic_font)
     size_cs = properties.find(qn("w:szCs"))
     if size_cs is None:
         size_cs = OxmlElement("w:szCs")
@@ -6292,6 +6308,43 @@ def write_word_build(build: WordBuild, docx_path: str | Path) -> dict:
     output.parent.mkdir(parents=True, exist_ok=True)
     word = Document()
     options = build.options
+    font_token = _FONT.set(str(getattr(options, "font", "") or ""))
+    try:
+        return _write_word_build(build, output, word, options)
+    finally:
+        _FONT.reset(font_token)
+
+
+def _set_default_font(word, family: str) -> None:
+    """The Normal style and the document defaults use `family` for every script."""
+    if not family:
+        return
+    for properties in (
+        word.styles["Normal"].element.get_or_add_rPr(),
+        word.styles.element.find(qn("w:docDefaults")).find(qn("w:rPrDefault")).find(qn("w:rPr"))
+        if word.styles.element.find(qn("w:docDefaults")) is not None else None,
+    ):
+        if properties is None:
+            continue
+        fonts = properties.find(qn("w:rFonts"))
+        if fonts is None:
+            fonts = OxmlElement("w:rFonts")
+            properties.insert(0, fonts)
+        for slot in ("w:asciiTheme", "w:hAnsiTheme", "w:cstheme", "w:eastAsiaTheme"):
+            if fonts.get(qn(slot)) is not None:
+                del fonts.attrib[qn(slot)]
+        for slot in ("w:ascii", "w:hAnsi", "w:cs", "w:eastAsia"):
+            fonts.set(qn(slot), family)
+
+
+def _write_word_build(build: WordBuild, output: Path, word, options) -> dict:
+    from core.html_layout import MERGE_PARAGRAPHS
+
+    try:
+        _set_default_font(word, (_FONT.get() or "").strip())
+    except Exception:
+        pass
+
     direction = options.direction if options.direction in {"auto", "rtl", "ltr"} else "rtl"
     counts = {
         "pages": 0,

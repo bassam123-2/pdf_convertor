@@ -194,7 +194,10 @@ def write_paragraph(host, block, conv) -> None:
         conv._set_block_align(paragraph, block.align)
     heading = block.kind == "heading" or block.role in {"title", "subtitle"}
     size = min(max(float(block.size or 11), 7.0), 28.0 if block.role else 18.0)
-    family = getattr(block, "font", "") or ""
+    from core.docx_converter import _FONT
+
+    # A fixed family for the whole file wins over the PDF's own family.
+    family = "" if _FONT.get() else (getattr(block, "font", "") or "")
     for part in _split_scripts(text):
         run = paragraph.add_run(part)
         conv._set_run_font(run, size, bool(block.bold or heading), part)

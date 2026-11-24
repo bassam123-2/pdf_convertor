@@ -1342,10 +1342,20 @@ _RESOLVED: dict[tuple, tuple] = {}
 
 def _resolve(chunk: Chunk) -> tuple:
     """Latin family, complex-script family, bold, italic, and the two faces."""
-    key = (chunk.font, chunk.flags, chunk.bold, chunk.italic)
+    from core.docx_converter import _FONT
+
+    fixed = (_FONT.get() or "").strip()
+    key = (chunk.font, chunk.flags, chunk.bold, chunk.italic, fixed)
     if key in _RESOLVED:
         return _RESOLVED[key]
     flags = chunk.flags | (16 if chunk.bold else 0) | (2 if chunk.italic else 0)
+    if fixed:
+        # One family for the whole file; weight and slant still come from the PDF.
+        bold = bool(chunk.bold or flags & 16)
+        italic = bool(chunk.italic or flags & 2)
+        face = font_catalog.find_face(fixed, bold, italic)
+        _RESOLVED[key] = (fixed, fixed, bold, italic, face, face)
+        return _RESOLVED[key]
     choice = font_catalog.choose_font(chunk.font, flags)
     latin_face = font_catalog.find_face(choice.family, choice.bold, choice.italic)
     complex_family = choice.family

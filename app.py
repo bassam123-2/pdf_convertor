@@ -810,6 +810,13 @@ def _render_word() -> None:
                 key="word_lock_footer",
                 help="مسافة ثابتة عن حافة الصفحة، ورقم الصفحة مقابل النص الجاري.",
             )
+            font_choice = st.selectbox(
+                "الخط",
+                options=("Times New Roman", "Arial", "Calibri", "Simplified Arabic", ""),
+                format_func=lambda item: item or "نفس خطوط الـ PDF",
+                key="word_font",
+                help="خط واحد لكل الملف، عربي وإنجليزي. Times New Roman موجود على كل ويندوز، فالملف يظهر بنفس الشكل على أي جهاز.",
+            )
         if st.button(
             "تحويل إلى وورد",
             key="word_convert",
@@ -830,6 +837,7 @@ def _render_word() -> None:
                     fit_a4=True,
                     direction=str(direction or "auto"),
                     mode=str(layout_mode or "editable"),
+                    font=str(font_choice or ""),
                 ),
             )
         _show_word_result()

@@ -443,7 +443,9 @@ def _installed_font(family: str):
 def _output_faces(text: str) -> list:
     """The faces Word assigns: the complex-script face, the Latin face, or both."""
     from core.arabic_fixer import _is_arabic
-    from core.docx_converter import _ARABIC_FONT, _LATIN_FONT
+    from core.docx_converter import output_fonts
+
+    _LATIN_FONT, _ARABIC_FONT = output_fonts()
 
     faces = []
     if any(_is_arabic(char) for char in text):
@@ -456,7 +458,9 @@ def _output_faces(text: str) -> list:
 def _text_width(text: str, size: float) -> float:
     """Width in the face Word will draw, measured per script."""
     from core.arabic_fixer import _is_arabic
-    from core.docx_converter import _ARABIC_FONT, _LATIN_FONT
+    from core.docx_converter import output_fonts
+
+    _LATIN_FONT, _ARABIC_FONT = output_fonts()
 
     width = 0.0
     piece = ""
