@@ -586,6 +586,7 @@ def _rebuild_vector(page: fitz.Page, region: ImageRegion) -> RebuiltTable | None
     if cols < 2 or len(rows) < 2:
         return _geometric_vector_fallback(page, region)
     bbox, widths, heights = _snap_to_rules(page, region.bbox, widths, heights)
+    rows = _reread_cells(page, bbox, rows, widths, heights)
     fills = _sample_fills(page, bbox, rows, widths, heights)
     rebuilt = RebuiltTable(
         kind="vector",
@@ -610,6 +611,44 @@ def _rebuild_vector(page: fitz.Page, region: ImageRegion) -> RebuiltTable | None
         except Exception:
             return None
     return rebuilt
+
+
+def _reread_cells(page: fitz.Page, bbox: tuple, rows: list[list[str]], widths: list[float], heights: list[float]) -> list[list[str]]:
+    """
+    Read every cell again from the page's glyphs with the paragraph reader.
+
+    The table finder's own text skips what the page reader repairs: Arabic
+    presentation forms stay unfolded and in visual order, fake-bold copies
+    stay doubled and lam-alef glyphs with a lost code stay foreign. The
+    glyphs inside each cell box are read the way a paragraph is. A cell
+    keeps the finder's text only when the reader finds nothing in it.
+    """
+    cols = max((len(row) for row in rows), default=0)
+    if not rows or len(widths) != cols or len(heights) != len(rows):
+        return rows
+    try:
+        from core.docx_converter import _atoms_on_page, _separate_overlapping_atoms, _text_inside
+        from core.faithful import _dedupe_fake_bold
+
+        atoms = _separate_overlapping_atoms(_dedupe_fake_bold(_atoms_on_page(page, upright_only=True)))
+    except Exception:
+        return rows
+    x_edges = [float(bbox[0])]
+    for width in widths:
+        x_edges.append(x_edges[-1] + width)
+    y_edges = [float(bbox[1])]
+    for height in heights:
+        y_edges.append(y_edges[-1] + height)
+    fresh = []
+    for r, row in enumerate(rows):
+        cells = []
+        for c in range(cols):
+            old = row[c] if c < len(row) else ""
+            box = (x_edges[c], y_edges[r], x_edges[c + 1], y_edges[r + 1])
+            text = _text_inside(atoms, box).strip()
+            cells.append(text or old)
+        fresh.append(cells)
+    return fresh
 
 
 def _ruling_lines(page: fitz.Page) -> tuple[list[tuple[float, float, float]], list[tuple[float, float, float]]]:

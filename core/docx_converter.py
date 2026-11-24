@@ -5906,7 +5906,7 @@ def _capture_flow(
         except Exception as exc:
             payload = None
             notes.append(f"Page {page_number}: the flowing reader failed ({exc}); the ordinary reader was used.")
-        if payload is not None and payload.lines:
+        if payload is not None and (payload.lines or payload.tables):
             notes.extend(payload.notes)
             blocks = blocks_from_faithful(page, payload)
             return WordPage(page_number, blocks, width, height, kind="digital")
@@ -6036,6 +6036,18 @@ def read_word_build(
                         if strategy == "scanned":
                             use_faithful = False
                         if strategy == "editable" or strategy == "table":
+                            use_faithful = False
+                        # The flowing layout also takes pages the classifier keeps
+                        # faithful only for their art (a logo, a ruled frame). A slide
+                        # or a page whose text is drawn as outlines stays faithful.
+                        reason = plan.reason if plan is not None else ""
+                        if (
+                            use_faithful
+                            and not faithful_mode
+                            and getattr(options, "flow", True)
+                            and strategy == "faithful"
+                            and not reason.startswith(("landscape page", "dense vector drawings with no text layer"))
+                        ):
                             use_faithful = False
                         if use_faithful:
                             capture = _capture_faithful

@@ -192,9 +192,10 @@ def _trace_words(page: fitz.Page) -> list[tuple[str, fitz.Rect]]:
         previous: fitz.Rect | None = None
         for text, rect in units + [(" ", None)]:
             # A writer may leave the space out and just move the pen: a gap
-            # wider than a quarter of the type size ends the word too.
+            # wider than an eighth of the type size ends the word too
+            # (joined Arabic letters touch; Latin letters sit closer than that).
             gap = rect is not None and previous is not None and (
-                max(rect.x0, previous.x0) - min(rect.x1, previous.x1) > size * 0.25
+                max(rect.x0, previous.x0) - min(rect.x1, previous.x1) > size * 0.12
             )
             if text.isspace() or gap:
                 if current.strip():

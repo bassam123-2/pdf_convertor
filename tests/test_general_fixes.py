@@ -151,3 +151,31 @@ def test_floating_table_sits_on_its_drawn_grid(tmp_path):
         xml = package.read("word/document.xml").decode("utf-8")
     assert "tblpXSpec" not in xml and "tblpYSpec" not in xml
     assert xml.index("<w:tblpPr") < xml.index("<w:tblW ")
+
+
+def test_list_items_start_their_own_paragraph():
+    from core.html_layout import merge_paragraphs
+
+    lines = [
+        _block("1. Interests regarding investment or", 40, 100, 280, 112),
+        _block("ownership in a commercial activity", 40, 113, 270, 125),
+        _block("2. A commercial activity or any facility", 40, 126, 280, 138),
+    ]
+    merged = merge_paragraphs(lines)
+    assert [block.text[:2] for block in merged] == ["1.", "2."]
+
+
+def test_side_by_side_columns_keep_printed_order(tmp_path):
+    from docx import Document
+
+    blocks = []
+    for row in range(5):
+        y = 100 + row * 20
+        blocks.append(_block(f"English {row}", 40, y, 280, y + 12))
+        blocks.append(_block(f"عربي {row}", 320, y, 560, y + 12))
+    document = Document()
+    flow_layout.write_flow_page(document, blocks, 600, 800, {})
+    xml = document.element.xml
+    assert '<w:bidiVisual w:val="0"/>' in xml
+    assert xml.index("English 0") < xml.index("عربي 0")
+    assert xml.count("<w:tblLayout") == 1

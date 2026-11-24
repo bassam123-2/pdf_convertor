@@ -73,44 +73,44 @@ def find_gutter(blocks: list, page_width: float) -> float | None:
     """
     The x of the empty strip between two side-by-side columns, or None.
 
-    Only blocks narrower than most of the sheet take part: a full-width title
-    belongs to no column. The strip must lie in the middle half of the sheet,
-    and each side must hold text that sits level with text on the other side.
+    Two text blocks that sit level with each other, one left and one right,
+    leave a gap between them. A gutter is an x that lies in the gaps of
+    several such pairs, in the middle part of the sheet. A title centred
+    across both columns does not hide it: only level pairs are looked at.
     """
-    narrow = [b for b in blocks if _kind(b) == "text" and (_box(b)[2] - _box(b)[0]) < page_width * _SPAN_SHARE]
-    if len(narrow) < 4:
+    texts = [b for b in blocks if _kind(b) == "text" and (_box(b)[2] - _box(b)[0]) < page_width * _SPAN_SHARE]
+    gaps: list[tuple[float, float]] = []
+    for i, a in enumerate(texts):
+        ax0, ay0, ax1, ay1 = _box(a)
+        for b in texts[i + 1:]:
+            bx0, by0, bx1, by1 = _box(b)
+            level = min(ay1, by1) - max(ay0, by0)
+            if level < min(ay1 - ay0, by1 - by0) * 0.5:
+                continue
+            left, right = (ax1, bx0) if ax1 <= bx0 else (bx1, ax0) if bx1 <= ax0 else (None, None)
+            if left is None or right - left < _MIN_GUTTER:
+                continue
+            gaps.append((left, right))
+    if len(gaps) < 2:
         return None
-    lo, hi = int(page_width * 0.25), int(page_width * 0.75)
-    covered = [0] * (int(page_width) + 2)
-    for block in narrow:
-        x0, _y0, x1, _y1 = _box(block)
-        for x in range(max(0, int(x0)), min(len(covered), int(x1) + 1)):
-            covered[x] += 1
-    best: tuple[int, int] | None = None
-    start = None
-    for x in range(lo, hi + 1):
-        if covered[x] == 0:
-            start = x if start is None else start
-            continue
-        if start is not None and (best is None or x - start > best[1] - best[0]):
-            best = (start, x)
-        start = None
-    if start is not None and (best is None or hi + 1 - start > best[1] - best[0]):
-        best = (start, hi + 1)
-    if best is None or best[1] - best[0] < _MIN_GUTTER:
+    lo, hi = page_width * 0.2, page_width * 0.8
+    best_x, best_votes = None, 0
+    for x in range(int(lo), int(hi) + 1):
+        votes = sum(1 for left, right in gaps if left <= x <= right)
+        if votes > best_votes:
+            best_x, best_votes = x, votes
+    if best_x is None or best_votes < 2:
         return None
-    gutter = (best[0] + best[1]) / 2.0
-    left = [b for b in narrow if _box(b)[2] <= gutter]
-    right = [b for b in narrow if _box(b)[0] >= gutter]
-    if len(left) < 2 or len(right) < 2:
-        return None
-    # The two sides must run alongside each other, not one above the other.
-    level = 0.0
-    for a in left:
-        for b in right:
-            level += max(0.0, min(_box(a)[3], _box(b)[3]) - max(_box(a)[1], _box(b)[1]))
-    side_height = min(sum(_box(b)[3] - _box(b)[1] for b in left), sum(_box(b)[3] - _box(b)[1] for b in right))
-    if level < side_height * 0.3:
+    # Centre the gutter in the strip every voting pair leaves open.
+    shared = [(left, right) for left, right in gaps if left <= best_x <= right]
+    left = max(l for l, _ in shared)
+    right = min(r for _, r in shared)
+    gutter = (left + right) / 2.0
+    # Each side needs text of its own; a page of one column with a stray
+    # side note is not two columns.
+    left_side = [b for b in texts if _box(b)[2] <= gutter]
+    right_side = [b for b in texts if _box(b)[0] >= gutter]
+    if len(left_side) < 2 or len(right_side) < 2:
         return None
     return gutter
 
@@ -271,9 +271,16 @@ def _column_table(document, conv, widths_pt: list[float]):
     if old is not None:
         properties.remove(old)
     properties.append(width)
+    for old_layout in properties.findall(qn("w:tblLayout")):
+        properties.remove(old_layout)
     layout = OxmlElement("w:tblLayout")
     layout.set(qn("w:type"), "fixed")
     properties.append(layout)
+    # Cells are in printed order, left to right. Say so: in a right-to-left
+    # section a table without this may be laid out mirrored.
+    visual = OxmlElement("w:bidiVisual")
+    visual.set(qn("w:val"), "0")
+    properties.append(visual)
     grid = table._tbl.find(qn("w:tblGrid"))
     if grid is not None:
         for node, value in zip(grid.findall(qn("w:gridCol")), widths_pt):

@@ -353,7 +353,7 @@ def _flow_together(previous, block) -> bool:
         return False
     if bool(getattr(previous, "bold", False)) != bool(getattr(block, "bold", False)):
         return False
-    if (getattr(block, "text", "") or "").startswith(("•", "●", "▪", "◦")):
+    if _starts_list_item(getattr(block, "text", "") or ""):
         return False
     left = _box(previous)
     right = _box(block)
@@ -362,6 +362,22 @@ def _flow_together(previous, block) -> bool:
     gap = right[1] - left[3]
     size = max(float(getattr(previous, "size", 12)), 8.0)
     return -1.0 <= gap <= max(size * 0.85, 7.0)
+
+
+_LIST_START = re.compile(
+    r"^\s*(?:"
+    r"[•●▪◦■□➢►✓\-–\uF0A7\uF0B7\uF0D8\uF0FC]"            # bullets, Wingdings bullets
+    r"|\(?[\d٠-٩]{1,3}\s*[.)\-–](?=\s|[\u0600-\u06FF])"     # 1.  2)  ٣-
+    r"|\.[\d٠-٩]{1,3}(?=\s*[\u0600-\u06FF])"                 # .1 in a right-to-left line
+    r"|[\d٠-٩]{1,3}(?=[\u0600-\u06FF])"                        # 1أي
+    r"|\(?[a-zA-Z\u0623-\u064A]\)\s"                            # a)  (b)  أ)
+    r")"
+)
+
+
+def _starts_list_item(text: str) -> bool:
+    """True when a line opens a new bullet or numbered item."""
+    return bool(_LIST_START.match(text or ""))
 
 
 def merge_paragraphs(blocks: list) -> list:
