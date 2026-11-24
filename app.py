@@ -792,6 +792,20 @@ def _render_word() -> None:
             horizontal=True,
             key="word_tables",
         )
+        layout_mode = st.radio(
+            "شكل ملف الوورد",
+            options=("editable", "faithful"),
+            format_func=lambda item: {
+                "editable": "قابل للتعديل (فقرات عادية) - موصى به",
+                "faithful": "مطابق لشكل الـ PDF (مربعات نص)",
+            }[item],
+            horizontal=True,
+            key="word_layout_mode",
+            help=(
+                "قابل للتعديل: نص عادي يلتف داخل الصفحة، والأعمدة المتجاورة في خلايا جدول بلا حدود. "
+                "مطابق للشكل: كل سطر في مكانه بالضبط فوق صورة الصفحة، لكن التعديل عليه صعب."
+            ),
+        )
         if st.button(
             "تحويل إلى وورد",
             key="word_convert",
@@ -811,6 +825,7 @@ def _render_word() -> None:
                     tables_as_images=tables_mode == "visual",
                     fit_a4=True,
                     direction=str(direction or "auto"),
+                    mode=str(layout_mode or "editable"),
                 ),
             )
         _show_word_result()
