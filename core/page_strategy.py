@@ -151,8 +151,10 @@ def classify_page(page: fitz.Page, default_mode: str = "faithful") -> PagePlan:
             drawings,
             images,
         )
-    if chars < 40 and drawings == 0 and images == 0:
+    if chars < 3 and drawings == 0 and images == 0:
         return PagePlan(number, "scanned", "little or no text layer; page looks like a scan or a picture", width, height, chars, drawings, images)
+    # A short page of real text with no picture on it is not a scan: there is
+    # nothing to read from pixels, and OCR would throw the text layer away.
     if _looks_broken(page):
         return PagePlan(number, "broken_font", "text layer has many unmapped characters", width, height, chars, drawings, images)
     landscape = width > height * 1.15

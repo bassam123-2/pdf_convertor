@@ -184,7 +184,7 @@ def _box_texts(xml: str) -> list[str]:
     return [_text_of(box) for box in re.findall(r"<w:txbxContent>(.*?)</w:txbxContent>", xml, re.S)]
 
 
-def check_structure(docx: Path, report: QualityReport, source_word_count: int) -> None:
+def check_structure(docx: Path, report: QualityReport, source_word_count: int, expect_editable: bool = True) -> None:
     parts = _xml_parts(docx)
     body = parts.get("word/document.xml", "")
     box_words = sum(len(_words_of(t)) for xml in parts.values() for t in _box_texts(xml))
@@ -201,7 +201,7 @@ def check_structure(docx: Path, report: QualityReport, source_word_count: int) -
     )
     if total and editable < EDITABLE_MIN:
         report.findings.append(Finding(
-            "editable", "error",
+            "editable", "error" if expect_editable else "warning",
             f"Only {editable:.0%} of the words are in normal paragraphs; {box_words} words sit in "
             f"{boxes} floating text boxes. Word counts, search, editing and reflow will not work as expected.",
         ))
@@ -242,6 +242,16 @@ def check_spacing(docx: Path, report: QualityReport) -> None:
 def check_duplicates(docx: Path, report: QualityReport) -> None:
     """Two text boxes with the same text at (nearly) the same spot."""
     xml = _strip_boxes_fallback(_xml_parts(docx).get("word/document.xml", ""))
+    # One sheet at a time: the same heading at the same spot on two pages is fine.
+    doubles = []
+    for sheet in re.split(r'<w:br w:type="page"/>|<w:sectPr\b', xml):
+        doubles += _doubles_on_sheet(sheet)
+    report.measures["duplicate_boxes"] = len(doubles)
+    for text in doubles[:10]:
+        report.findings.append(Finding("duplicates", "error", "The same text is drawn twice at one spot.", sample=text[:60]))
+
+
+def _doubles_on_sheet(xml: str) -> list[str]:
     anchors = re.findall(r"<wp:anchor.*?</wp:anchor>", xml, re.S)
     placed = []
     for anchor in anchors:
@@ -260,9 +270,7 @@ def check_duplicates(docx: Path, report: QualityReport) -> None:
                 doubles.append(text)
                 break
         seen.setdefault(text, []).append((x, y))
-    report.measures["duplicate_boxes"] = len(doubles)
-    for text in doubles[:10]:
-        report.findings.append(Finding("duplicates", "error", "The same text is drawn twice at one spot.", sample=text[:60]))
+    return doubles
 
 
 # --------------------------------------------------------------------------
@@ -357,6 +365,12 @@ def _check_printed_pages(pdf: fitz.Document, printed: fitz.Document, report: Qua
         words, bad = page_words(page)
         source_words += words
         unreadable += bad
+    if len(source_words) < 5 * max(1, pdf.page_count) * 0.2 and not unreadable:
+        report.findings.append(Finding(
+            "text", "warning",
+            "The PDF has no text layer (a scan), so its words cannot be compared with Word.",
+        ))
+        return
     source_bag = _bag(source_words)
     result_bag = _bag([w for page in printed for w in page_words(page)[0]])
     report.measures["source_unreadable_words"] = unreadable
@@ -382,13 +396,23 @@ def _check_printed_pages(pdf: fitz.Document, printed: fitz.Document, report: Qua
 # --------------------------------------------------------------------------
 
 
-def check_word(pdf_path: str | Path, docx_path: str | Path, renderer: str = "auto", printed: bool = True) -> QualityReport:
+def check_word(
+    pdf_path: str | Path,
+    docx_path: str | Path,
+    renderer: str = "auto",
+    printed: bool = True,
+    expect_editable: bool = True,
+) -> QualityReport:
+    """
+    Run every check. `expect_editable` is False for the faithful mode, where
+    text boxes are the design; there a low editable share is only a warning.
+    """
     pdf_path, docx_path = Path(pdf_path), Path(docx_path)
     report = QualityReport(str(pdf_path), str(docx_path))
     pdf = fitz.open(pdf_path)
     try:
         source_words = sum(len(words) for words in pdf_words(pdf))
-        check_structure(docx_path, report, source_words)
+        check_structure(docx_path, report, source_words, expect_editable)
         check_spacing(docx_path, report)
         check_duplicates(docx_path, report)
         if printed:
@@ -417,9 +441,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("docx")
     parser.add_argument("--renderer", default="auto", choices=("auto", "word", "libreoffice"))
     parser.add_argument("--no-print", action="store_true", help="Skip the checks that print the Word file")
+    parser.add_argument("--faithful", action="store_true", help="The file was made in faithful mode (text boxes allowed)")
     parser.add_argument("--json", help="Write the report as JSON to this path")
     args = parser.parse_args(argv)
-    report = check_word(args.pdf, args.docx, renderer=args.renderer, printed=not args.no_print)
+    report = check_word(args.pdf, args.docx, renderer=args.renderer, printed=not args.no_print,
+                        expect_editable=not args.faithful)
     print(format_report(report))
     if args.json:
         Path(args.json).write_text(json.dumps(report.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")

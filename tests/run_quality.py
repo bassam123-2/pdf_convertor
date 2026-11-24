@@ -46,7 +46,7 @@ def run(only: list[str], modes: list[str], renderer: str) -> list[dict]:
             started = time.time()
             try:
                 convert_arabic_pdf_to_docx(pdf, docx, options=WordOptions(mode=mode))
-                report = check_word(pdf, docx, renderer=renderer).to_dict()
+                report = check_word(pdf, docx, renderer=renderer, expect_editable=(mode == "editable")).to_dict()
                 row.update(ok=report["ok"], measures=report["measures"], counts=report["counts"],
                            findings=report["findings"])
             except Exception as exc:

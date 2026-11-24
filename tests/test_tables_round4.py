@@ -86,8 +86,9 @@ def test_page_label_becomes_page_field(tmp_path: Path):
     assert validation["ok"], validation.get("errors")
     with zipfile.ZipFile(out) as archive:
         xml = archive.read("word/document.xml").decode("utf-8", errors="replace")
-        # Footer parts may be in header/footer files.
-        footers = [name for name in archive.namelist() if "footer" in name.lower()]
+        # The label sits at the top of this sample, so its field is in the
+        # header part; a label at the foot would be in a footer part.
+        footers = [name for name in archive.namelist() if "footer" in name.lower() or "header" in name.lower()]
         blob = xml + "".join(archive.read(name).decode("utf-8", errors="replace") for name in footers)
     assert "PAGE" in blob or "w:fldChar" in blob
 

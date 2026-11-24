@@ -585,10 +585,11 @@ def _rebuild_vector(page: fitz.Page, region: ImageRegion) -> RebuiltTable | None
     cols = max((len(row) for row in rows), default=0)
     if cols < 2 or len(rows) < 2:
         return _geometric_vector_fallback(page, region)
-    fills = _sample_fills(page, region.bbox, rows, widths, heights)
+    bbox, widths, heights = _snap_to_rules(page, region.bbox, widths, heights)
+    fills = _sample_fills(page, bbox, rows, widths, heights)
     rebuilt = RebuiltTable(
         kind="vector",
-        bbox=region.bbox,
+        bbox=bbox,
         rows=rows,
         fills=fills,
         widths=widths,
@@ -609,6 +610,80 @@ def _rebuild_vector(page: fitz.Page, region: ImageRegion) -> RebuiltTable | None
         except Exception:
             return None
     return rebuilt
+
+
+def _ruling_lines(page: fitz.Page) -> tuple[list[tuple[float, float, float]], list[tuple[float, float, float]]]:
+    """Vertical rules as (x, y0, y1) and horizontal rules as (y, x0, x1)."""
+    verticals: list[tuple[float, float, float]] = []
+    horizontals: list[tuple[float, float, float]] = []
+    try:
+        drawings = page.get_drawings()
+    except Exception:
+        return verticals, horizontals
+    for drawing in drawings:
+        for item in drawing.get("items") or []:
+            if not item:
+                continue
+            if item[0] == "l" and len(item) >= 3:
+                a, b = item[1], item[2]
+                if abs(a.x - b.x) <= 1.0:
+                    verticals.append(((a.x + b.x) / 2, min(a.y, b.y), max(a.y, b.y)))
+                elif abs(a.y - b.y) <= 1.0:
+                    horizontals.append(((a.y + b.y) / 2, min(a.x, b.x), max(a.x, b.x)))
+            elif item[0] == "re" and len(item) >= 2:
+                r = item[1]
+                if r.width <= 2.0 and r.height > 4:
+                    verticals.append(((r.x0 + r.x1) / 2, r.y0, r.y1))
+                elif r.height <= 2.0 and r.width > 4:
+                    horizontals.append(((r.y0 + r.y1) / 2, r.x0, r.x1))
+    return verticals, horizontals
+
+
+def _snap_to_rules(page: fitz.Page, bbox: tuple, widths: list[float], heights: list[float]) -> tuple[tuple, list[float], list[float]]:
+    """
+    Move a table's outer edges and column edges onto the lines drawn for it.
+
+    The table finder sometimes stops at the text inside the cells, so the
+    last column comes out as wide as its longest word. When the page draws
+    vertical rules across the table, the rules are the true column edges.
+    """
+    x0, y0, x1, y1 = (float(v) for v in bbox)
+    height = max(1.0, y1 - y0)
+    width = max(1.0, x1 - x0)
+    verticals, horizontals = _ruling_lines(page)
+    # Rules that run down most of the table's height, near its sides.
+    xs = sorted(
+        x for x, top, bottom in verticals
+        if min(bottom, y1) - max(top, y0) >= height * 0.6 and x0 - width * 0.25 <= x <= x1 + width * 0.75
+    )
+    edges: list[float] = []
+    for x in xs:
+        if not edges or x - edges[-1] > 3.0:
+            edges.append(x)
+    if len(edges) != len(widths) + 1:
+        return bbox, widths, heights
+    # Every text column must still start inside its own rule pair.
+    starts = [x0]
+    for w in widths[:-1]:
+        starts.append(starts[-1] + w)
+    if any(not (edges[i] - 3.0 <= starts[i] <= edges[i + 1]) for i in range(len(widths))):
+        return bbox, widths, heights
+    new_x0, new_x1 = edges[0], edges[-1]
+    ys = [y for y, left, right in horizontals if min(right, new_x1) - max(left, new_x0) >= (new_x1 - new_x0) * 0.6]
+    new_y0 = min([y for y in ys if y <= y0 + 3.0] or [y0])
+    new_y1 = max([y for y in ys if y >= y1 - 3.0] or [y1])
+    new_widths = [edges[i + 1] - edges[i] for i in range(len(widths))]
+    rows_y: list[float] = []
+    for y in sorted(y for y in ys if new_y0 - 1.0 <= y <= new_y1 + 1.0):
+        if not rows_y or y - rows_y[-1] > 3.0:
+            rows_y.append(y)
+    if len(rows_y) == len(heights) + 1:
+        heights = [rows_y[i + 1] - rows_y[i] for i in range(len(heights))]
+    else:
+        # Spread the added height over the rows in proportion.
+        total = sum(heights) or 1.0
+        heights = [h * (new_y1 - new_y0) / total for h in heights]
+    return (new_x0, new_y0, new_x1, new_y1), new_widths, heights
 
 
 def _cluster_double_border_columns(

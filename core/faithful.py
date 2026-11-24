@@ -133,6 +133,10 @@ class FaithfulPage:
     # Page-number chrome stripped from body lines (written as a PAGE field).
     page_label_format: str = ""
     page_label_side: str = ""
+    # "header" or "footer": where the PDF printed the page label.
+    page_label_place: str = ""
+    # The number the PDF printed on this page, when it printed one.
+    page_label_number: int | None = None
     # Upright rules (x, y0, y1) used to clamp text boxes inside columns.
     column_rules: list[tuple[float, float, float]] = field(default_factory=list)
 
@@ -312,8 +316,11 @@ def _overfull_arabic_text(text: str, box: float, size: float) -> bool:
             prefix = candidate[:span]
             if not prefix:
                 continue
+            # A twin repeats right after itself (one stray letter allowed).
+            # A prefix that only comes back later, as لات in التعاملات, is
+            # how ordinary words are spelt.
             idx = candidate.find(prefix, span)
-            if idx >= span and idx - span <= span + 1:
+            if idx >= span and idx - span <= 1:
                 return True
     # Extreme density only — Arabic is narrow; avoid flagging normal words.
     expected = size * 0.42 * len(letters)
@@ -725,7 +732,11 @@ def _build_line(atoms: list[_Atom], page_reads_left: bool) -> Line | None:
     if not any(atom.text.strip() for atom in atoms):
         return None
     turned_line = any(atom.level % 2 == 1 for atom in atoms)
-    left_base = turned_line and page_reads_left
+    # An English page can still hold a line that is all Arabic (a bilingual
+    # title or column). That line reads right to left whatever the page does.
+    arabic_letters = sum(1 for atom in atoms for char in atom.text if _is_arabic(char))
+    latin_letters = sum(1 for atom in atoms for char in atom.text if char.isascii() and char.isalpha())
+    left_base = turned_line and page_reads_left and latin_letters >= arabic_letters
     pieces, turned = _logical_pieces(atoms, ltr_base=left_base)
     letters: list[_Atom] = []
     seen: set[int] = set()
@@ -1149,7 +1160,17 @@ def _strip_page_labels(payload: FaithfulPage) -> None:
     for line in payload.lines:
         compact = re.sub(r"\s+", " ", (line.text or "").strip())
         spaced = re.sub(r"(?<=[A-Za-z])\s+(?=[A-Za-z])", "", compact)
-        if _PAGE_LABEL.match(compact) or _PAGE_LABEL.match(spaced):
+        # A label at the foot of the sheet moves into the Word footer, one at
+        # the head into the Word header. A label in the body stays text.
+        at_foot = float(line.y0) >= float(payload.height) * 0.8
+        at_head = float(line.y1) <= float(payload.height) * 0.2
+        if (at_foot or at_head) and (_PAGE_LABEL.match(compact) or _PAGE_LABEL.match(spaced)):
+            digits = re.search(r"[\d٠-٩]{1,4}", compact)
+            if digits and payload.page_label_number is None:
+                payload.page_label_number = int(unicodedata.normalize("NFKC", digits.group(0)).translate(
+                    str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")))
+            if not payload.page_label_place:
+                payload.page_label_place = "header" if at_head else "footer"
             if not payload.page_label_format:
                 if "|" in compact or "|" in spaced:
                     payload.page_label_format = "{PAGE} | Page"
@@ -1870,6 +1891,23 @@ def _write_fallback_picture(document, table, scale: float, off_x: float, off_y: 
     counts["tables"] = counts.get("tables", 0) + 1
 
 
+_TBL_PR_ORDER = (
+    "tblStyle", "tblpPr", "tblOverlap", "bidiVisual", "tblStyleRowBandSize", "tblStyleColBandSize",
+    "tblW", "jc", "tblCellSpacing", "tblInd", "tblBorders", "shd", "tblLayout", "tblCellMar",
+    "tblLook", "tblCaption", "tblDescription",
+)
+
+
+def _order_tbl_pr(props) -> None:
+    """Put w:tblPr children in schema order; Word may refuse a file otherwise."""
+    rank = {name: index for index, name in enumerate(_TBL_PR_ORDER)}
+    children = list(props)
+    children.sort(key=lambda node: rank.get(node.tag.rsplit("}", 1)[-1], len(rank)))
+    for node in children:
+        props.remove(node)
+        props.append(node)
+
+
 def _write_floating_table(document, table, scale: float, off_x: float, off_y: float, counts: dict) -> None:
     """
     Native w:tbl anchored to the page at the PDF table position (faithful mode).
@@ -1901,8 +1939,8 @@ def _write_floating_table(document, table, scale: float, off_x: float, off_y: fl
     tblp.set(qn("w:vertAnchor"), "page")
     tblp.set(qn("w:tblpX"), str(int(round((table.bbox[0] * scale + off_x) * 20))))
     tblp.set(qn("w:tblpY"), str(int(round((table.bbox[1] * scale + off_y) * 20))))
-    tblp.set(qn("w:tblpXSpec"), "left")
-    tblp.set(qn("w:tblpYSpec"), "top")
+    # No tblpXSpec/tblpYSpec: a spec overrides tblpX/tblpY and sends the
+    # table to the page edge.
     existing_p = props.find(qn("w:tblpPr"))
     if existing_p is not None:
         props.remove(existing_p)
@@ -1930,6 +1968,8 @@ def _write_floating_table(document, table, scale: float, off_x: float, off_y: fl
     if getattr(table, "rtl", False):
         bidi = OxmlElement("w:bidiVisual")
         props.append(bidi)
+
+    _order_tbl_pr(props)
 
     grid = word_table._tbl.find(qn("w:tblGrid"))
     if grid is not None:

@@ -398,8 +398,24 @@ def _atoms_on_page(page: fitz.Page, upright_only: bool = False) -> list[_Atom]:
                 space,
             )
             atoms.append(current)
+    _repair_ligatures(page, atoms)
     atoms.extend(_gap_spaces(atoms))
     return atoms
+
+
+def _repair_ligatures(page: fitz.Page, atoms: list[_Atom]) -> None:
+    """Lam-alef glyphs whose Unicode value the PDF stored wrongly."""
+    from core import ligature_repair
+
+    if not any(len(atom.text) == 1 and ord(atom.text) > 0x36F and not ("\u0600" <= atom.text <= "\u06FF")
+               and (ligature_repair.truncated_ligature(atom.text) or ligature_repair._FOREIGN.match(atom.text))
+               for atom in atoms):
+        return
+    try:
+        known = ligature_repair.document_vocabulary(page)
+    except Exception:
+        known = None
+    ligature_repair.repair_atoms(atoms, known)
 
 
 def _cluster_baselines(atoms: list[_Atom]) -> list[list[_Atom]]:
@@ -2989,7 +3005,10 @@ def extract_page(
     below it stay text. Every box is clipped to this page.
     """
     atoms = _atoms_on_page(page)
-    digital_layer = sum(len(atom.text.strip()) for atom in atoms) >= 40
+    letters = sum(len(atom.text.strip()) for atom in atoms)
+    # A short text layer on a page with no picture is still the real text:
+    # there are no pixels to read it from instead.
+    digital_layer = letters >= 40 or (letters >= 3 and not _page_has_images(page))
     reading = "digital" if digital_layer else "scan"
     if mode == "ocr":
         recovered = _ocr_word_atoms(page)
@@ -3080,6 +3099,13 @@ def _retry_mode(report: dict, digital_layer: bool) -> str:
     if digital_layer and (report.get("coverage", 1) < 0.78 or report.get("fragmented")):
         return "ocr"
     return "plain"
+
+
+def _page_has_images(page: fitz.Page) -> bool:
+    try:
+        return bool(page.get_images(full=True))
+    except Exception:
+        return True
 
 
 def _cover_lines(page: fitz.Page, atoms: list[_Atom]) -> list[_Line]:
@@ -3332,9 +3358,13 @@ def _read_page(
     """
     source = _body_atoms(page, _atoms_on_page(page))
     raw = _atoms_on_page(page)
-    digital_layer = sum(len(atom.text.strip()) for atom in raw) >= 40
+    letters = sum(len(atom.text.strip()) for atom in raw)
+    digital_layer = letters >= 40 or (letters >= 3 and not _page_has_images(page))
     trust_letters = digital_layer and not _encoding_broken(page, raw)
-    if page_number == 1:
+    # A cover kept as one picture loses every word on it. Only a cover with
+    # no trustworthy text layer is kept that way; otherwise it is read like
+    # any page, and its art is carried by the page background.
+    if page_number == 1 and not trust_letters:
         cover = _read_cover(page, raw, background_xrefs)
         if cover is not None:
             kind_out["kind"] = "digital" if digital_layer else "scan"
@@ -3617,9 +3647,17 @@ def _set_paragraph_ltr(paragraph) -> None:
     """An English paragraph starts at the left and is not bidirectional."""
     paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
     properties = paragraph._p.get_or_add_pPr()
+    # An explicit "off": a removed w:bidi would inherit the style's or the
+    # document default's right-to-left setting and mirror the line.
     bidi = properties.find(qn("w:bidi"))
-    if bidi is not None:
-        properties.remove(bidi)
+    if bidi is None:
+        bidi = OxmlElement("w:bidi")
+        anchor = properties.find(qn("w:jc"))
+        if anchor is not None:
+            anchor.addprevious(bidi)
+        else:
+            properties.append(bidi)
+    bidi.set(qn("w:val"), "0")
     justification = properties.find(qn("w:jc"))
     if justification is None:
         justification = OxmlElement("w:jc")
@@ -3754,9 +3792,15 @@ def _apply_faithful_page_footer(
     label_format: str,
     side: str,
     section_bidi: bool = False,
+    place: str = "footer",
+    start: int | None = None,
 ) -> None:
     """
-    Write one consistent PAGE field footer for faithful pages.
+    Write one consistent PAGE field footer (or header) for faithful pages.
+
+    `place` is where the PDF printed the label. `start` is the number the PDF
+    printed on the section's first page, so the live field shows the same
+    number instead of counting from 1.
 
     Formats such as '{PAGE} | Page' match thesis exports where the PDF printed
     '8 | Page'. Every page of the section gets the same separator and direction.
@@ -3767,8 +3811,18 @@ def _apply_faithful_page_footer(
         section.footer_distance = Emu(int(14 * 12700))
     except Exception:
         pass
-    footer = section.footer
+    if place == "header":
+        try:
+            section.header_distance = Emu(int(14 * 12700))
+        except Exception:
+            pass
+        section.header.is_linked_to_previous = False
+        footer = section.header
+    else:
+        footer = section.footer
     _clear_story(footer)
+    if start is not None:
+        _set_page_start(section, start)
     paragraph = footer.paragraphs[0]
     paragraph.text = ""
     _clear_paragraph_borders(paragraph)
@@ -3797,6 +3851,23 @@ def _apply_faithful_page_footer(
         _set_run_font(run, 9.0, False, after)
     for run in paragraph.runs:
         _set_run_font(run, 9.0, False)
+
+
+def _set_page_start(section, number: int) -> None:
+    """Make the section's PAGE field count from `number`."""
+    properties = section._sectPr
+    numbering = properties.find(qn("w:pgNumType"))
+    if numbering is None:
+        numbering = OxmlElement("w:pgNumType")
+        # pgNumType sits before cols/docGrid in sectPr.
+        anchor = properties.find(qn("w:cols"))
+        if anchor is None:
+            anchor = properties.find(qn("w:docGrid"))
+        if anchor is not None:
+            anchor.addprevious(numbering)
+        else:
+            properties.append(numbering)
+    numbering.set(qn("w:start"), str(max(0, int(number))))
 
 
 def _add_text(document: Document, block: TextBlock, content_width_pt: float = 460.0) -> None:
@@ -5166,8 +5237,18 @@ def _fill_footer(section, chrome: _PageChrome, content_width_emu: int) -> None:
     of that line is measured from the right, so the page number lands on the
     left. An English footer keeps the title on the left and the number on the right.
     """
-    footer = section.footer
+    if place == "header":
+        try:
+            section.header_distance = Emu(int(14 * 12700))
+        except Exception:
+            pass
+        section.header.is_linked_to_previous = False
+        footer = section.header
+    else:
+        footer = section.footer
     _clear_story(footer)
+    if start is not None:
+        _set_page_start(section, start)
     paragraph = footer.paragraphs[0]
     paragraph.text = ""
     _clear_paragraph_borders(paragraph)
@@ -6127,8 +6208,12 @@ def write_word_build(build: WordBuild, docx_path: str | Path) -> dict:
                 )
                 # Body page labels become a live PAGE field with one format.
                 label_format = getattr(payload, "page_label_format", "") or ""
-                use_page_field = bool(options.lock_footer and (label_format or any(build.chrome.footer.values())))
-                footer_key = (label_format, getattr(payload, "page_label_side", "") or build.chrome.footer_number_side)
+                # Only a page whose own number line was lifted gets a footer
+                # field; otherwise the footer would add a "N | Page" line the
+                # PDF never printed.
+                use_page_field = bool(options.lock_footer and label_format)
+                label_place = getattr(payload, "page_label_place", "") or "footer"
+                footer_key = (label_format, getattr(payload, "page_label_side", "") or build.chrome.footer_number_side, label_place)
                 sign = (round(page_size[0], 1), round(page_size[1], 1), "faithful", footer_key if use_page_field else ())
                 if not started or sign != signature:
                     _start_section(
@@ -6150,6 +6235,8 @@ def write_word_build(build: WordBuild, docx_path: str | Path) -> dict:
                             label_format or "{PAGE} | Page",
                             getattr(payload, "page_label_side", "") or "left",
                             section_bidi=section_bidi,
+                            place=label_place,
+                            start=getattr(payload, "page_label_number", None),
                         )
                     started = True
                 else:
