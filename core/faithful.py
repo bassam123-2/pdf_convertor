@@ -468,8 +468,12 @@ def _dedupe_fake_bold(atoms: list[_Atom]) -> list[_Atom]:
                 continue
             if abs(atom.origin_y - other.origin_y) > max(1.5, atom.size * 0.25):
                 continue
+            # An overprint copy is shifted by a fraction of its own glyph. The
+            # next letter of a double letter (the second l of "all") is a whole
+            # glyph further on, however narrow the glyph is.
             dx = abs(((atom.x0 + atom.x1) / 2.0) - ((other.x0 + other.x1) / 2.0))
-            if dx > max(2.5, atom.size * 0.35):
+            glyph = max(0.5, min(atom.x1 - atom.x0, other.x1 - other.x0))
+            if dx > min(max(2.5, atom.size * 0.35), glyph * 0.5):
                 continue
             # Same word, nearly the same place.
             other.bold = True

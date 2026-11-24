@@ -132,11 +132,18 @@ def page_words(page: fitz.Page) -> tuple[list[str], int]:
     kept: list[str] = []
     spots: dict[str, list[fitz.Rect]] = {}
     unreadable = 0
-    for item in page.get_text("words"):
-        word = normalize_word(str(item[4]))
+    from core.ligature_repair import _FOREIGN, truncated_ligature
+
+    for text, rect in _trace_words(page):
+        text = "".join(truncated_ligature(ch) or ch for ch in text)
+        if _FOREIGN.search(text) and _ARABIC.search(text):
+            # A ligature whose code the PDF lost: the PDF does not say which
+            # letters it is, so the word cannot be held against the output.
+            unreadable += 1
+            continue
+        word = normalize_word(text)
         if not word:
             continue
-        rect = fitz.Rect(item[:4])
         if any(abs(r.x0 - rect.x0) < 2.5 and abs(r.y0 - rect.y0) < 2.5 for r in spots.get(word, [])):
             continue
         spots.setdefault(word, []).append(rect)
@@ -145,6 +152,63 @@ def page_words(page: fitz.Page) -> tuple[list[str], int]:
             continue
         kept.append(word)
     return kept, unreadable
+
+
+def _trace_words(page: fitz.Page) -> list[tuple[str, fitz.Rect]]:
+    """
+    Words with their boxes, read glyph by glyph.
+
+    A lam-alef ligature is one glyph that stands for two letters; the second
+    letter comes back with no glyph of its own (glyph id -1). A right-to-left
+    run is stored in visual order, so the run is turned around to read it,
+    but the ligature's two letters must stay in their own order. Plain text
+    extraction turns them around too and reports التعامالت for التعاملات, a
+    fault in the reading, not in the file.
+    """
+    words: list[tuple[str, fitz.Rect]] = []
+    try:
+        traces = page.get_texttrace() or []
+    except Exception:
+        traces = []
+    for trace in traces:
+        if int(trace.get("type") or 0) != 0:
+            continue
+        units: list[tuple[str, fitz.Rect]] = []
+        for raw in trace.get("chars") or []:
+            char = chr(raw[0])
+            rect = fitz.Rect(raw[3])
+            if raw[1] < 0 and units:
+                text, box = units[-1]
+                units[-1] = (text + char, box | rect)
+                continue
+            units.append((char, rect))
+        if int(trace.get("bidi_lvl") or 0) % 2 == 1 or (
+            units and sum(1 for t, _ in units if _ARABIC.search(t)) > len(units) / 2
+            and units[0][1].x0 > units[-1][1].x0
+        ):
+            units.reverse()
+        size = float(trace.get("size") or 10)
+        current, box = "", None
+        previous: fitz.Rect | None = None
+        for text, rect in units + [(" ", None)]:
+            # A writer may leave the space out and just move the pen: a gap
+            # wider than a quarter of the type size ends the word too.
+            gap = rect is not None and previous is not None and (
+                max(rect.x0, previous.x0) - min(rect.x1, previous.x1) > size * 0.25
+            )
+            if text.isspace() or gap:
+                if current.strip():
+                    words.append((current, box))
+                current, box = "", None
+                if text.isspace():
+                    previous = None
+                    continue
+            current += text
+            box = rect if box is None else box | rect
+            previous = rect
+    if not words:
+        words = [(str(w[4]), fitz.Rect(w[:4])) for w in page.get_text("words")]
+    return words
 
 
 def pdf_words(pdf: fitz.Document) -> list[list[str]]:
@@ -307,7 +371,7 @@ def _overlaps(words: list) -> list[tuple[str, str]]:
     return found
 
 
-def check_printed(pdf: fitz.Document, docx: Path, report: QualityReport, renderer: str) -> None:
+def check_printed(pdf: fitz.Document, docx: Path, report: QualityReport, renderer: str, flowing: bool = False) -> None:
     from core.visual_check import render_docx
 
     with tempfile.TemporaryDirectory(prefix="pdf_tool_qc_") as work:
@@ -315,17 +379,23 @@ def check_printed(pdf: fitz.Document, docx: Path, report: QualityReport, rendere
         report.renderer = render_docx(docx, printed_path, renderer=renderer)
         printed = fitz.open(printed_path)
         try:
-            _check_printed_pages(pdf, printed, report)
+            _check_printed_pages(pdf, printed, report, flowing)
         finally:
             printed.close()
 
 
-def _check_printed_pages(pdf: fitz.Document, printed: fitz.Document, report: QualityReport) -> None:
+def _check_printed_pages(pdf: fitz.Document, printed: fitz.Document, report: QualityReport, flowing: bool = False) -> None:
+    """
+    `flowing`: the file is meant to reflow (editable mode). Text may then move
+    from its PDF spot and a page may run a little longer; only words off the
+    sheet count as stray, and a small change in page count is a warning.
+    """
     report.measures["pdf_pages"] = pdf.page_count
     report.measures["word_pages"] = printed.page_count
     if printed.page_count != pdf.page_count:
+        close = abs(printed.page_count - pdf.page_count) <= max(1, round(pdf.page_count * 0.15))
         report.findings.append(Finding(
-            "pages", "error",
+            "pages", "warning" if flowing and close else "error",
             f"The PDF has {pdf.page_count} pages; the Word file prints on {printed.page_count}.",
         ))
 
@@ -333,8 +403,17 @@ def _check_printed_pages(pdf: fitz.Document, printed: fitz.Document, report: Qua
     for index in range(min(pdf.page_count, printed.page_count)):
         source, result = pdf[index], printed[index]
         area = _text_area(source)
-        words = [w for w in result.get_text("words") if str(w[4]).strip()]
-        if area is not None:
+        words = [(*tuple(rect), text) for text, rect in _trace_words(result) if text.strip()]
+        if flowing:
+            sheet = result.rect + (-1, -1, 1, 1)
+            stray = [str(w[4]) for w in words if not sheet.contains(fitz.Rect(w[:4]))]
+            stray_total += len(stray)
+            if stray:
+                report.findings.append(Finding(
+                    "stray", "error", f"{len(stray)} words print off the sheet.",
+                    page=index + 1, sample=" ".join(stray[:8])[:90],
+                ))
+        elif area is not None:
             # The printed sheet may be a different size; scale the PDF's area onto it.
             sx = result.rect.width / source.rect.width
             sy = result.rect.height / source.rect.height
@@ -376,7 +455,9 @@ def _check_printed_pages(pdf: fitz.Document, printed: fitz.Document, report: Qua
     report.measures["source_unreadable_words"] = unreadable
     common = sum((source_bag & result_bag).values())
     recall = common / (sum(source_bag.values()) or 1)
-    precision = common / (sum(result_bag.values()) or 1)
+    # Words the PDF itself garbled cannot be matched either way; leave the
+    # same number out of Word's side.
+    precision = common / (max(1, sum(result_bag.values()) - unreadable))
     report.measures["text_recall"] = round(recall, 3)
     report.measures["text_precision"] = round(precision, 3)
     if recall < TEXT_RECALL_MIN:
@@ -417,7 +498,7 @@ def check_word(
         check_duplicates(docx_path, report)
         if printed:
             try:
-                check_printed(pdf, docx_path, report, renderer)
+                check_printed(pdf, docx_path, report, renderer, flowing=expect_editable)
             except Exception as exc:  # no renderer, or it failed
                 report.findings.append(Finding("render", "warning", f"Printed checks skipped: {exc}"))
     finally:

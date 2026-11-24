@@ -109,6 +109,10 @@ class WordOptions:
     cancel: object | None = None
     # Parallel page readers (1 = sequential). Each worker opens its own PDF.
     workers: int = 1
+    # Editable mode only. True writes ordinary flowing paragraphs (columns as
+    # borderless table cells); False pins every paragraph in a floating frame
+    # at its PDF position, as earlier versions did.
+    flow: bool = True
 
 
 def _is_faithful(options: "WordOptions") -> bool:
@@ -5237,18 +5241,8 @@ def _fill_footer(section, chrome: _PageChrome, content_width_emu: int) -> None:
     of that line is measured from the right, so the page number lands on the
     left. An English footer keeps the title on the left and the number on the right.
     """
-    if place == "header":
-        try:
-            section.header_distance = Emu(int(14 * 12700))
-        except Exception:
-            pass
-        section.header.is_linked_to_previous = False
-        footer = section.header
-    else:
-        footer = section.footer
+    footer = section.footer
     _clear_story(footer)
-    if start is not None:
-        _set_page_start(section, start)
     paragraph = footer.paragraphs[0]
     paragraph.text = ""
     _clear_paragraph_borders(paragraph)
@@ -5878,6 +5872,47 @@ def _capture_faithful(
     return WordPage(page_number, [], width, height, faithful=payload)
 
 
+def _capture_flow(
+    page: fitz.Page,
+    plumber_page,
+    background_xrefs: set[int],
+    furniture: set[tuple[str, str]],
+    schema: _ColumnSchema,
+    page_number: int,
+    notes: list[str],
+    options: WordOptions,
+    repair: str = "",
+) -> WordPage:
+    """
+    Read one page for the flowing editable layout.
+
+    The faithful reader does the reading: it splits side-by-side columns at
+    their rules, drops fake-bold copies and repairs broken Arabic glyphs. Its
+    lines then become ordinary paragraphs instead of positioned boxes. A page
+    the faithful reader cannot read as text (a scan, outlined glyphs) goes to
+    the ordinary reader, which can OCR it.
+    """
+    from core import faithful
+    from core.flow_layout import blocks_from_faithful
+
+    width = float(page.rect.width)
+    height = float(page.rect.height)
+    raw = _atoms_on_page(page)
+    letters = sum(len(atom.text.strip()) for atom in raw)
+    digital_layer = letters >= 40 or (letters >= 3 and not _page_has_images(page))
+    if digital_layer and not (page_number == 1 and options.preserve_first_page):
+        try:
+            payload = faithful.read_page(page, repair)
+        except Exception as exc:
+            payload = None
+            notes.append(f"Page {page_number}: the flowing reader failed ({exc}); the ordinary reader was used.")
+        if payload is not None and payload.lines:
+            notes.extend(payload.notes)
+            blocks = blocks_from_faithful(page, payload)
+            return WordPage(page_number, blocks, width, height, kind="digital")
+    return _capture_page(page, plumber_page, background_xrefs, furniture, schema, page_number, notes, options, repair)
+
+
 def _remember_page(record: WordPage) -> dict:
     return {
         "blocks": record.blocks,
@@ -6002,7 +6037,12 @@ def read_word_build(
                             use_faithful = False
                         if strategy == "editable" or strategy == "table":
                             use_faithful = False
-                        capture = _capture_faithful if use_faithful else _capture_page
+                        if use_faithful:
+                            capture = _capture_faithful
+                        elif getattr(options, "flow", True) and not faithful_mode and strategy != "scanned":
+                            capture = _capture_flow
+                        else:
+                            capture = _capture_page
                         record = capture(
                             page,
                             _plumber_at(plumber, index),
@@ -6269,7 +6309,12 @@ def write_word_build(build: WordBuild, docx_path: str | Path) -> dict:
             else:
                 _add_page_break(word)
             signature = sign
-            _write_page(word, blocks, frame_w, frame_h, counts)
+            if getattr(build.options, "flow", True):
+                from core.flow_layout import write_flow_page
+
+                write_flow_page(word, blocks, frame_w, frame_h, counts)
+            else:
+                _write_page(word, blocks, frame_w, frame_h, counts)
             counts["pages"] += 1
         _collapse_section_breaks(word)
         word.save(output)
