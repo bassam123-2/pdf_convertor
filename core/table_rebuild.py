@@ -41,6 +41,8 @@ class ImageRegion:
     reason: str
     xref: int | None = None
     image_bytes: bytes = b""
+    # fill_table only: row bands, column edges and the label column's colour.
+    geometry: dict | None = None
 
 
 @dataclass
@@ -208,6 +210,13 @@ def classify_regions(page: fitz.Page) -> list[ImageRegion]:
             )
         )
 
+    # Tables drawn with coloured cells and no rules (a label column of
+    # filled boxes, text beside it).
+    for region in _fill_tables(page, atoms):
+        if any(_overlap_ratio(region.bbox, r.bbox) > 0.3 for r in regions):
+            continue
+        regions.append(region)
+
     # Embedded images: table picture vs chart vs other.
     try:
         infos = page.get_image_info(xrefs=True) or []
@@ -225,10 +234,25 @@ def classify_regions(page: fitz.Page) -> list[ImageRegion]:
         if any(r.kind == "vector_table" and _overlap_ratio(bbox, r.bbox) > 0.5 for r in regions):
             continue
         xref = int(info.get("xref") or 0) or None
+        if is_decoration(page, bbox):
+            # Corner ornaments and backdrops are never tables or charts.
+            regions.append(ImageRegion("other", bbox, "page decoration", xref, b""))
+            continue
         png = _extract_png(page, xref, bbox)
         spans_inside = sum(1 for box in atoms if _center_inside(box, bbox))
         caption = _nearby_caption(text, atoms, bbox)
         looks_table, table_why = _pixels_look_like_table(png)
+        # A picture that runs off the sheet and spans most of its height is
+        # the page's decoration, printed under the text, not a chart.
+        bleeds = bbox[0] < -1 or bbox[1] < -1 or bbox[2] > page.rect.width + 1 or bbox[3] > page.rect.height + 1
+        if bleeds and (bbox[3] - bbox[1]) >= page.rect.height * 0.5 and not looks_table:
+            regions.append(ImageRegion("other", bbox, "page decoration behind the text", xref, png))
+            continue
+        if spans_inside >= 6 and not looks_table and _prose_over(page, bbox):
+            # Sentences printed over a faint picture: the picture is a
+            # backdrop, the text is body text, not a chart's labels.
+            regions.append(ImageRegion("other", bbox, "picture behind body text", xref, png))
+            continue
         if spans_inside >= 6 and not looks_table:
             # Text sits on top of a figure; treat as chart/figure region.
             regions.append(
@@ -284,6 +308,132 @@ def rebuild_tables(page: fitz.Page, regions: list[ImageRegion] | None = None) ->
             item = _rebuild_raster(page, region)
             if item is not None:
                 rebuilt.append(item)
+        elif region.kind == "fill_table":
+            item = _rebuild_fill(page, region)
+            if item is not None:
+                rebuilt.append(item)
+    return rebuilt
+
+
+def _filled_boxes(page: fitz.Page) -> list[tuple[fitz.Rect, tuple]]:
+    """Coloured rectangles that could be table cells, with their fill."""
+    boxes = []
+    width = float(page.rect.width)
+    try:
+        drawings = page.get_drawings()
+    except Exception:
+        return boxes
+    for drawing in drawings:
+        fill = drawing.get("fill")
+        rect = drawing.get("rect")
+        if not fill or rect is None:
+            continue
+        if all(channel >= 0.94 for channel in fill[:3]):
+            continue  # white paper
+        if not (15 <= rect.width <= width * 0.6 and 8 <= rect.height <= 160):
+            continue
+        boxes.append((fitz.Rect(rect), tuple(round(float(c), 2) for c in fill[:3])))
+    return boxes
+
+
+def _fill_tables(page: fitz.Page, atoms: list[tuple]) -> list[ImageRegion]:
+    """
+    Tables whose label column is a stack of filled boxes, one per row.
+
+    A definitions table in many Arabic documents is drawn that way: a column
+    of coloured cells holding the terms and, beside it, the text of each
+    row, with no ruling at all. A stack of three or more boxes of one colour
+    and one width, touching top to bottom, gives the rows; the text level
+    with them on one side gives the other column.
+    """
+    stacks: dict[tuple, list[fitz.Rect]] = {}
+    for rect, fill in _filled_boxes(page):
+        stacks.setdefault((round(rect.x0), round(rect.x1), fill), []).append(rect)
+    found: list[ImageRegion] = []
+    for (x0, x1, fill), rects in stacks.items():
+        rects = sorted(rects, key=lambda r: r.y0)
+        runs: list[list[fitz.Rect]] = [[rects[0]]]
+        for rect in rects[1:]:
+            if rect.y0 - runs[-1][-1].y1 <= 4.0:
+                runs[-1].append(rect)
+            else:
+                runs.append([rect])
+        for run in runs:
+            if len(run) < 3:
+                continue
+            left = right = 0
+            label_rows = 0
+            for rect in run:
+                band = [a for a in atoms if rect.y0 - 1 <= (a[1] + a[3]) / 2 <= rect.y1 + 1]
+                if any(rect.x0 - 1 <= (a[0] + a[2]) / 2 <= rect.x1 + 1 for a in band):
+                    label_rows += 1
+                left += sum(1 for a in band if a[2] <= rect.x0 + 2)
+                right += sum(1 for a in band if a[0] >= rect.x1 - 2)
+            if label_rows < len(run) * 0.6 or max(left, right) == 0:
+                continue
+            top, bottom = run[0].y0, run[-1].y1
+            stack_x0, stack_x1 = min(r.x0 for r in run), max(r.x1 for r in run)
+            side = [a for a in atoms if top - 1 <= (a[1] + a[3]) / 2 <= bottom + 1
+                    and ((a[2] <= stack_x0 + 2) if left >= right else (a[0] >= stack_x1 - 2))]
+            if not side:
+                continue
+            if left >= right:
+                edge = min(a[0] for a in side)
+                edges = [edge, stack_x0, stack_x1]
+                label = 1
+            else:
+                edge = max(a[2] for a in side)
+                edges = [stack_x0, stack_x1, edge]
+                label = 0
+            content_rows = sum(
+                1 for rect in run
+                if any(rect.y0 - 1 <= (a[1] + a[3]) / 2 <= rect.y1 + 1 for a in side)
+            )
+            if content_rows < len(run) * 0.5:
+                continue
+            bbox = (edges[0], top, edges[-1], bottom)
+            colour = "%02X%02X%02X" % tuple(int(round(c * 255)) for c in fill)
+            found.append(ImageRegion(
+                "fill_table",
+                bbox,
+                f"{len(run)} filled label cells with text beside them",
+                geometry={"rows": [(r.y0, r.y1) for r in run], "edges": edges, "label": label, "colour": colour},
+            ))
+    return found
+
+
+def _rebuild_fill(page: fitz.Page, region: ImageRegion) -> RebuiltTable | None:
+    geometry = region.geometry or {}
+    rows_y = geometry.get("rows") or []
+    edges = geometry.get("edges") or []
+    if len(rows_y) < 2 or len(edges) != 3:
+        return None
+    # Row bands meet: each row runs to the next row's top.
+    heights = [rows_y[i + 1][0] - rows_y[i][0] for i in range(len(rows_y) - 1)] + [rows_y[-1][1] - rows_y[-1][0]]
+    widths = [edges[1] - edges[0], edges[2] - edges[1]]
+    bbox = (edges[0], rows_y[0][0], edges[2], rows_y[0][0] + sum(heights))
+    rows = _reread_cells(page, bbox, [["", ""] for _ in rows_y], widths, heights)
+    filled = sum(1 for row in rows for cell in row if cell.strip())
+    if filled < len(rows) * 2 * 0.6:
+        return None
+    label = int(geometry.get("label", 1))
+    colour = str(geometry.get("colour") or "")
+    fills = [["", ""] for _ in rows]
+    for row in fills:
+        row[label] = colour
+    rebuilt = RebuiltTable(
+        kind="fill",
+        bbox=bbox,
+        rows=rows,
+        fills=fills,
+        widths=widths,
+        heights=heights,
+        confidences=[[100.0, 100.0] for _ in rows],
+        rules=False,
+        rtl=_page_rtl(page),
+        notes=[f"coloured-cell table: {region.reason}"],
+    )
+    rebuilt.usable = True
     return rebuilt
 
 
@@ -369,6 +519,45 @@ def _overlap_ratio(a: tuple, b: tuple) -> float:
     inter = (x1 - x0) * (y1 - y0)
     area = max(1.0, (a[2] - a[0]) * (a[3] - a[1]))
     return inter / area
+
+
+def is_decoration(page: fitz.Page, bbox) -> bool:
+    """
+    A picture that only decorates the page: it runs off the sheet over most
+    of its height, or body text is printed over it.
+    """
+    x0, y0, x1, y1 = (float(v) for v in bbox)
+    bleeds = x0 < -1 or y0 < -1 or x1 > page.rect.width + 1 or y1 > page.rect.height + 1
+    if bleeds and (y1 - y0) >= page.rect.height * 0.5:
+        return True
+    # A corner ornament cut by the sheet edge.
+    area = max(1.0, (x1 - x0) * (y1 - y0))
+    if bleeds and area <= page.rect.width * page.rect.height * 0.15:
+        return True
+    return _prose_over(page, (x0, y0, x1, y1))
+
+
+def _prose_over(page: fitz.Page, bbox: tuple) -> bool:
+    """True when the text over a picture is mostly sentences, not short labels."""
+    long_spans = spans = 0
+    try:
+        for block in page.get_text("dict").get("blocks") or []:
+            if block.get("type") != 0:
+                continue
+            for line in block.get("lines") or []:
+                text = " ".join((span.get("text") or "") for span in line.get("spans") or []).strip()
+                if not text:
+                    continue
+                box = line.get("bbox")
+                cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+                if not (bbox[0] <= cx <= bbox[2] and bbox[1] <= cy <= bbox[3]):
+                    continue
+                spans += 1
+                if len(text.split()) >= 5:
+                    long_spans += 1
+    except Exception:
+        return False
+    return spans >= 4 and long_spans >= spans * 0.5
 
 
 def _text_boxes(page: fitz.Page) -> list[tuple[float, float, float, float]]:

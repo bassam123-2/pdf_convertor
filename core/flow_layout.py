@@ -176,7 +176,8 @@ def _latin(text: str) -> bool:
 def write_paragraph(host, block, conv) -> None:
     """One text block as one paragraph, in the direction of its own letters."""
     text = conv._clean_flow_text(block.text or "")
-    if not text or not re.search(r"[0-9A-Za-z؀-ۿ]", text):
+    # A line of nothing but marks (a stray shadda or tanween) is not text.
+    if not text or not re.search(r"[0-9A-Za-z\u0621-\u064A\u0660-\u0669\u0671-\u06D3]", text):
         return
     paragraph = host.add_paragraph()
     paragraph.style = host.styles["Normal"]
@@ -194,6 +195,7 @@ def write_paragraph(host, block, conv) -> None:
         conv._set_block_align(paragraph, block.align)
     heading = block.kind == "heading" or block.role in {"title", "subtitle"}
     size = min(max(float(block.size or 11), 7.0), 28.0 if block.role else 18.0)
+    size *= _width_factor(text, getattr(block, "font", "") or "")
     from core.docx_converter import _FONT
 
     # A fixed family for the whole file wins over the PDF's own family.
@@ -215,7 +217,15 @@ def write_paragraph(host, block, conv) -> None:
                 pass
     paragraph.paragraph_format.space_before = Pt(max(0.0, float(block.gap_before or 0.0)))
     paragraph.paragraph_format.space_after = Pt(0)
-    paragraph.paragraph_format.line_spacing = 1.0
+    pitch = getattr(block, "pitch_ratio", None)
+    if pitch:
+        # The PDF's own baseline distance, never tighter than the letters need.
+        from docx.enum.text import WD_LINE_SPACING
+
+        paragraph.paragraph_format.line_spacing = Pt(max(size * 1.2, size * pitch))
+        paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
+    else:
+        paragraph.paragraph_format.line_spacing = 1.0
     if block.fill:
         conv._shade_box(paragraph._p.get_or_add_pPr(), block.fill)
 
@@ -330,7 +340,7 @@ def _column_table(document, conv, widths_pt: list[float]):
     return table
 
 
-def write_flow_page(document, blocks: list, page_width: float, page_height: float, counts: dict) -> None:
+def write_flow_page(document, blocks: list, page_width: float, page_height: float, counts: dict, header_bottom: float = 0.0) -> None:
     """Write one page's blocks as flowing paragraphs, column tables, tables and pictures."""
     from core import docx_converter as conv
 
@@ -340,6 +350,9 @@ def write_flow_page(document, blocks: list, page_width: float, page_height: floa
     height_pt = (int(section.page_height) - int(section.top_margin) - int(section.bottom_margin)) / 12700.0
     # The running footer is written by the section; leave its lines out here.
     body = [b for b in blocks if _kind(b) == "table" or _box(b)[1] < page_height * 0.92]
+    # Pictures inside the running header band are already in the Word header.
+    if header_bottom > 0:
+        body = [b for b in body if not (_kind(b) == "image" and _box(b)[3] <= header_bottom + 4)]
     gutter = find_gutter(body, page_width)
     for kind, items in _runs(body, gutter, page_width):
         if kind == "flow":
@@ -381,13 +394,21 @@ def blocks_from_faithful(page, payload) -> list:
         if getattr(table, "fallback_png", None) and not getattr(table, "usable", True):
             blocks.append(ImageBlock(box, table.fallback_png, box[2] - box[0], box[3] - box[1], "center"))
             continue
-        blocks.append(TableBlock(
+        sizes = sorted(
+            float(line.size) for line in payload.lines
+            if box[0] <= (line.x0 + line.x1) / 2 <= box[2] and box[1] <= (line.y0 + line.y1) / 2 <= box[3]
+        ) or sorted(float(s) for s in _sizes_in(page, box))
+        block = TableBlock(
             bbox=box,
             rows=rows,
             fills=[list(row) for row in (getattr(table, "fills", None) or [])],
             widths=list(getattr(table, "widths", None) or []),
             rules=bool(getattr(table, "rules", True)),
-        ))
+        )
+        if sizes:
+            # The cells' own type size (the writer starts from 11 pt).
+            block.fit_scale = max(0.7, min(1.6, sizes[len(sizes) // 2] / 11.0))
+        blocks.append(block)
 
     def inside_table(line) -> bool:
         cx, cy = (line.x0 + line.x1) / 2.0, (line.y0 + line.y1) / 2.0
@@ -423,11 +444,19 @@ def blocks_from_faithful(page, payload) -> list:
             from core.font_catalog import _spaced
 
             block.font = _spaced(max(fonts, key=fonts.get))
+        if color and _light(color):
+            # White letters on a coloured banner: without the banner they
+            # vanish on white paper, so the banner's colour goes behind them.
+            under = _colour_under(page, (line.x0, line.y0, line.x1, line.y1))
+            if under and not _light(under):
+                block.fill = under
+            else:
+                block.color = ""
         blocks.append(block)
 
     page_area = float(page.rect.width * page.rect.height) or 1.0
     try:
-        infos = page.get_image_info() or []
+        infos = page.get_image_info(xrefs=True) or []
     except Exception:
         infos = []
     for info in infos:
@@ -442,14 +471,150 @@ def blocks_from_faithful(page, payload) -> list:
         # A picture a table was read from is replaced by that table.
         if any((fitz.Rect(t) & rect).get_area() >= rect.get_area() * 0.6 for t in table_boxes):
             continue
-        try:
-            pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), clip=rect, alpha=False)
-            data = pixmap.tobytes("png")
-        except Exception:
-            continue
+        if _decoration(page, tuple(float(v) for v in box)):
+            continue  # page decoration under the text: the flow has no backdrop
+        if int(info.get("width") or 99) <= 4 or int(info.get("height") or 99) <= 4:
+            continue  # a stretched strip of pixels: a gradient or a rule
+        # The picture itself, with its transparency, not a cut-out of the
+        # page: a cut-out would carry the words printed over it a second time.
+        data = None
+        xref = int(info.get("xref") or 0)
+        if xref:
+            try:
+                from core.docx_converter import _image_bytes, _pale_image
+
+                data = _image_bytes(page, xref)
+                if data and _pale_image(data):
+                    continue  # a faint watermark: decoration
+            except Exception:
+                data = None
+        if not data:
+            try:
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), clip=rect, alpha=False)
+                data = pixmap.tobytes("png")
+            except Exception:
+                continue
         blocks.append(ImageBlock((rect.x0, rect.y0, rect.x1, rect.y1), data, rect.width, rect.height, "center"))
+    _line_pitch(blocks)
     _set_alignment(blocks, float(page.rect.width))
     return blocks
+
+
+def _line_pitch(blocks: list) -> None:
+    """
+    The distance between baselines the PDF used, as a share of the type size.
+
+    Consecutive lines of one column give it; the page's middle value is kept
+    on every text block so a paragraph is set with the same line spacing as
+    the PDF instead of the output font's own (often much taller) spacing.
+    """
+    texts = sorted((b for b in blocks if _kind(b) == "text"), key=lambda b: _box(b)[1])
+    ratios = []
+    for a, b in zip(texts, texts[1:]):
+        ax0, ay0, ax1, ay1 = _box(a)
+        bx0, by0, bx1, by1 = _box(b)
+        if min(ax1, bx1) - max(ax0, bx0) < min(ax1 - ax0, bx1 - bx0) * 0.3:
+            continue
+        size = float(a.size or 11)
+        step = by0 - ay0
+        if 0.9 * size <= step <= 2.2 * size and abs(float(b.size or 11) - size) < 1.0:
+            ratios.append(step / size)
+    if len(ratios) < 3:
+        return
+    ratio = sorted(ratios)[len(ratios) // 2]
+    for block in texts:
+        block.pitch_ratio = ratio
+
+
+_WIDTHS: dict[str, object] = {}
+
+
+def _advances(family: str):
+    """Character -> advance (in ems) for an installed family, or None."""
+    if family in _WIDTHS:
+        return _WIDTHS[family]
+    _WIDTHS[family] = None
+    try:
+        from fontTools.ttLib import TTFont
+
+        from core.font_repair import _family_files, _key_name
+
+        files = _family_files().get(_key_name(family)) or []
+        if not files:
+            return None
+        path, index = files[0]
+        font = TTFont(path, fontNumber=index, lazy=True)
+        cmap = font.getBestCmap() or {}
+        metrics = font["hmtx"].metrics
+        units = float(font["head"].unitsPerEm or 1000)
+        _WIDTHS[family] = {chr(code): metrics[name][0] / units for code, name in cmap.items() if name in metrics}
+    except Exception:
+        _WIDTHS[family] = None
+    return _WIDTHS[family]
+
+
+def _width_factor(text: str, source_family: str) -> float:
+    """
+    How much smaller the output font must be set to take the PDF font's room.
+
+    The same text is measured, letter by letter, in the PDF's own family and
+    in the family the file is written in. A narrow font such as Sakkal
+    Majalla replaced by a wider one would otherwise push every page onto
+    two. Never below 70%, never larger than the PDF.
+    """
+    from core.docx_converter import _FONT
+
+    target = (_FONT.get() or "").strip()
+    if not target or not source_family or _key(target) == _key(source_family) or len(text) < 4:
+        return 1.0
+    out = _advances(target)
+    src = _advances(source_family)
+    if not out or not src:
+        return 1.0
+    default_out = out.get("\u0628", 0.5)
+    default_src = src.get("\u0628", 0.5)
+    wide = sum(out.get(char, default_out) for char in text)
+    narrow = sum(src.get(char, default_src) for char in text)
+    if wide <= 0 or narrow <= 0 or wide <= narrow * 1.02:
+        return 1.0
+    return max(0.7, narrow / wide)
+
+
+def _key(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
+def _fit_to_output_font(blocks: list) -> None:
+    """
+    Shrink type that the output font draws wider than the PDF's font did.
+
+    Written in one fixed family, a line set in a narrow font (Sakkal
+    Majalla) takes far more room in a wide one (Times New Roman) at the same
+    point size, and a page runs onto two or three. Each line is measured in
+    the output family; when it would be wider than it was printed, its size
+    shrinks by that ratio (never below 70%). A block keeps the ratio of its
+    widest lines, so a paragraph shrinks as one.
+    """
+    from core.docx_converter import _FONT
+
+    family = (_FONT.get() or "").strip()
+    if not family:
+        return
+    advances = _advances(family)
+    if not advances:
+        return
+    for block in blocks:
+        if _kind(block) != "text":
+            continue
+        text = block.text or ""
+        printed = _box(block)[2] - _box(block)[0]
+        size = float(block.size or 11)
+        if printed <= 0 or len(text) < 8:
+            continue
+        natural = sum(advances.get(char, advances.get("\u0628", 0.5)) for char in text) * size
+        if natural <= printed * 1.02:
+            continue
+        block.size = size * max(0.7, printed / natural)
 
 
 def _set_alignment(blocks: list, page_width: float) -> None:
@@ -472,6 +637,77 @@ def _set_alignment(blocks: list, page_width: float) -> None:
         middle = (x0 + x1) / 2.0
         if abs(middle - (left + right) / 2.0) <= width * 0.06 and x0 - left > width * 0.08 and right - x1 > width * 0.08:
             block.align = "center"
+
+
+def _light(colour: str) -> bool:
+    value = colour.lstrip("#")
+    try:
+        red, green, blue = int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
+    except (ValueError, IndexError):
+        return False
+    return 0.299 * red + 0.587 * green + 0.114 * blue > 200
+
+
+def _colour_under(page, box) -> str:
+    """The commonest colour of the page around a line (its background)."""
+    import fitz
+
+    try:
+        rect = fitz.Rect(box) + (-2, -2, 2, 2)
+        pixmap = page.get_pixmap(matrix=fitz.Matrix(0.5, 0.5), clip=rect & page.rect, alpha=False)
+    except Exception:
+        return ""
+    counts: dict[tuple, int] = {}
+    samples = pixmap.samples
+    n = pixmap.n
+    for i in range(0, len(samples) - n + 1, n):
+        key = tuple(samples[i + c] // 16 * 16 for c in range(3))
+        counts[key] = counts.get(key, 0) + 1
+    if not counts:
+        return ""
+    red, green, blue = max(counts, key=counts.get)
+    return "%02X%02X%02X" % (red, green, blue)
+
+
+def _sizes_in(page, box) -> list[float]:
+    """Type sizes of the text drawn inside a box."""
+    sizes = []
+    try:
+        for trace in page.get_texttrace() or []:
+            for raw in trace.get("chars") or []:
+                x0, y0, x1, y1 = raw[3]
+                if box[0] <= (x0 + x1) / 2 <= box[2] and box[1] <= (y0 + y1) / 2 <= box[3] and chr(raw[0]).strip():
+                    sizes.append(float(trace.get("size") or 0))
+    except Exception:
+        return []
+    return [size for size in sizes if size > 0]
+
+
+def _decoration(page, rect) -> bool:
+    try:
+        from core.table_rebuild import is_decoration
+
+        return is_decoration(page, tuple(rect))
+    except Exception:
+        return False
+
+
+def _other_glyphs(page) -> int:
+    """Glyphs painted at an angle or as outlines (the flow writes none of them)."""
+    from core.docx_converter import _upright
+
+    count = 0
+    try:
+        traces = page.get_texttrace() or []
+    except Exception:
+        return 0
+    for trace in traces:
+        kind = int(trace.get("type") or 0)
+        if kind == 3:
+            continue
+        if kind != 0 or not _upright(trace):
+            count += sum(1 for raw in trace.get("chars") or [] if chr(int(raw[0])).strip())
+    return count
 
 
 def page_flows_well(page, payload) -> tuple[bool, str]:
@@ -497,7 +733,11 @@ def page_flows_well(page, payload) -> tuple[bool, str]:
     if len(tokens) >= 12 and mixed >= 5 and mixed / len(tokens) >= 0.04:
         return False, f"{mixed} of {len(tokens)} Arabic words carry Latin letters or symbols (broken font map)"
     if any("drawn as an outline" in note or "set at an angle" in note for note in payload.notes):
-        return False, "text at an angle or drawn as outlines"
+        # A few such glyphs (a word in a logo, a rotated page tab) are not
+        # worth the page; many are.
+        odd = _other_glyphs(page)
+        if odd > max(20, glyphs * 0.05):
+            return False, f"{odd} glyphs set at an angle or drawn as outlines"
     if any(note.startswith("Chart/figure") and "overlapping text labels" in note for note in payload.notes):
         return False, "a figure carries text labels"
     area = float(page.rect.width * page.rect.height) or 1.0
@@ -523,6 +763,10 @@ def page_flows_well(page, payload) -> tuple[bool, str]:
             continue
         if any((box & rect).get_area() >= rect.get_area() * 0.6 for box in rebuilt):
             continue  # this picture was a table and is written as one
+        if _decoration(page, tuple(float(v) for v in (info.get("bbox") or rect))):
+            continue  # a backdrop, not written in the flow
+        if int(info.get("width") or 99) <= 4 or int(info.get("height") or 99) <= 4:
+            continue
         pictures += 1
         covered += rect.get_area()
     if pictures > 6 or covered / area > 0.45:

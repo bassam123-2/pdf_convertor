@@ -6547,7 +6547,11 @@ def _write_word_build(build: WordBuild, output: Path, word, options) -> dict:
             if getattr(build.options, "flow", True) and not getattr(record, "frames", False):
                 from core.flow_layout import write_flow_page
 
-                write_flow_page(word, blocks, frame_w, frame_h, counts)
+                # The Word header already carries the running header's art.
+                header_top = 0.0
+                if header_on and build.chrome.header_png and build.chrome.header_band > 0:
+                    header_top = float(build.chrome.header_top) + float(build.chrome.header_band)
+                write_flow_page(word, blocks, frame_w, frame_h, counts, header_bottom=header_top)
             else:
                 _write_page(word, blocks, frame_w, frame_h, counts)
             counts["pages"] += 1
