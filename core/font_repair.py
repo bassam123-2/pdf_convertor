@@ -280,6 +280,45 @@ def _reference(path: str, index: int) -> _Reference | None:
     return reference
 
 
+def _structure(key: tuple) -> tuple:
+    return (key[0], tuple((op, len(points)) for op, points in key[1]))
+
+
+def _near_match(reference: _Reference, key: tuple) -> str | None:
+    """
+    The letters of the one reference glyph drawn almost exactly like `key`.
+
+    Another release of a font can move a few points of a glyph slightly.
+    A glyph with the same advance and the same drawing steps whose points
+    lie within a small distance is taken, but only when it is clearly the
+    closest: a second candidate nearly as close leaves the glyph unread.
+    """
+    groups = reference.__dict__.setdefault("_by_structure", None)
+    if groups is None:
+        groups = {}
+        for candidate, letters in reference.keys.items():
+            groups.setdefault(_structure(candidate), []).append((candidate, letters))
+        reference.__dict__["_by_structure"] = groups
+    options = groups.get(_structure(key), [])
+    if not options:
+        return None
+
+    def distance(other: tuple) -> int:
+        worst = 0
+        for (_op, a), (_op2, b) in zip(key[1], other[1]):
+            for (x1, y1), (x2, y2) in zip(a, b):
+                worst = max(worst, abs(x1 - x2) + abs(y1 - y2))
+        return worst
+
+    ranked = sorted(((distance(candidate), letters) for candidate, letters in options), key=lambda item: item[0])
+    best, letters = ranked[0]
+    if best > 30:
+        return None
+    if len(ranked) > 1 and ranked[1][0] <= best * 2 + 4 and ranked[1][1] != letters:
+        return None
+    return letters
+
+
 # --------------------------------------------------------------------------
 # Embedded fonts
 
@@ -331,6 +370,10 @@ def embedded_map(document: fitz.Document, xref: int, pdf_name: str) -> EmbeddedM
             key = keys.get(name)
             if key is not None and key in reference.keys:
                 letters[gid] = reference.keys[key]
+            elif key is not None:
+                near = _near_match(reference, key)
+                if near:
+                    letters[gid] = near
             elif key is None and gid and float(metrics.get(name, (0, 0))[0]) > units * 0.1:
                 # Nothing drawn but the pen moves on: a space.
                 letters[gid] = " "
@@ -460,7 +503,7 @@ def _evidence(candidate: EmbeddedMap, trace: dict) -> bool:
             arabic_shape_latin_store += 1
     if garbage:
         return True
-    return known >= 2 and arabic_shape_latin_store >= known * 0.5
+    return known >= 1 and arabic_shape_latin_store >= known * 0.5
 
 
 def _choose(maps: list[EmbeddedMap], trace: dict) -> tuple[EmbeddedMap | None, bool]:
@@ -611,13 +654,47 @@ def repaired_traces(page: fitz.Page, traces: list[dict]) -> list[dict]:
     broken = set(by_font)
     if not broken:
         return traces
+    # First the traces long enough to name their subset on their own.
+    decided: dict[int, tuple[EmbeddedMap | None, bool]] = {}
+    anchors: list[tuple[str, float, float, EmbeddedMap, bool]] = []
+    for index, trace in enumerate(traces):
+        key = _key_name(_base(str(trace.get("font") or "")))
+        if key not in broken or int(trace.get("type") or 0) != 0:
+            continue
+        glyphs = [raw for raw in trace.get("chars") or [] if int(raw[1]) >= 0 and not chr(int(raw[0])).isspace()]
+        chosen, healthy = _choose(maps[key], trace)
+        decided[index] = (chosen, healthy)
+        if chosen is not None and len(glyphs) >= 3:
+            x = sum(float(raw[2][0]) for raw in glyphs) / len(glyphs)
+            anchors.append((key, float(glyphs[0][2][1]), x, chosen, healthy))
+    # A trace of one or two glyphs can fit several subsets by chance: it
+    # takes the subset of the nearest long trace of its font on its line.
+    for index, trace in enumerate(traces):
+        if index not in decided:
+            continue
+        glyphs = [raw for raw in trace.get("chars") or [] if int(raw[1]) >= 0 and not chr(int(raw[0])).isspace()]
+        if not glyphs or len(glyphs) >= 3:
+            continue
+        key = _key_name(_base(str(trace.get("font") or "")))
+        y = float(glyphs[0][2][1])
+        x = float(glyphs[0][2][0])
+        near = [a for a in anchors if a[0] == key and abs(a[1] - y) <= 2.0]
+        if not near:
+            continue
+        best = min(near, key=lambda a: abs(a[2] - x))
+        subset = best[3]
+        if all(int(raw[1]) in subset.letters for raw in glyphs):
+            sound = _agreement(subset, trace)
+            healthy = bool(sound[1]) and sound[0] / sound[1] >= 0.6
+            if healthy or _evidence(subset, trace):
+                decided[index] = (subset, healthy)
     fixed: list[dict] = []
-    for trace in traces:
+    for index, trace in enumerate(traces):
         key = _key_name(_base(str(trace.get("font") or "")))
         if key not in broken or int(trace.get("type") or 0) != 0:
             fixed.append(trace)
             continue
-        chosen, healthy = _choose(maps[key], trace)
+        chosen, healthy = decided.get(index, (None, True))
         if chosen is None:
             fixed.append(trace)
             continue

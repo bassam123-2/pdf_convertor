@@ -166,6 +166,7 @@ def _trace_words(page: fitz.Page) -> list[tuple[str, fitz.Rect]]:
     fault in the reading, not in the file.
     """
     words: list[tuple[str, fitz.Rect]] = []
+    every: list[tuple[str, fitz.Rect, float]] = []
     try:
         traces = page.get_texttrace() or []
     except Exception:
@@ -190,44 +191,58 @@ def _trace_words(page: fitz.Page) -> list[tuple[str, fitz.Rect]]:
                 units[-1] = (text + char, box | rect)
                 continue
             units.append((char, rect))
-        # Read an Arabic run from right to left and a Latin run from left to
-        # right by where each glyph sits, whichever order the PDF stored
-        # them in. A ligature unit keeps its letters in their own order.
         size = float(trace.get("size") or 10)
-        if units and sum(1 for t, _ in units if _ARABIC.search(t)) > len(units) / 2:
-            # One trace may hold several lines: line by line, top to bottom,
-            # each line from its right end. A line break also ends a word.
-            ordered: list[tuple[str, fitz.Rect]] = []
-            rows: list[list[tuple[str, fitz.Rect]]] = []
-            for unit in sorted(units, key=lambda u: (u[1].y0 + u[1].y1) / 2):
-                middle = (unit[1].y0 + unit[1].y1) / 2
-                if rows and abs(middle - (rows[-1][0][1].y0 + rows[-1][0][1].y1) / 2) <= size * 0.5:
-                    rows[-1].append(unit)
-                else:
-                    rows.append([unit])
-            for row in rows:
-                ordered.extend(sorted(row, key=lambda u: -(u[1].x0 + u[1].x1)))
-                ordered.append((" ", None))
-            units = ordered[:-1]
-        elif int(trace.get("bidi_lvl") or 0) % 2 == 1:
-            units.reverse()
-        current, box = "", None
-        previous: fitz.Rect | None = None
-        for text, rect in units + [(" ", None)]:
-            # A writer may leave the space out and just move the pen: a gap
-            # wider than an eighth of the type size ends the word too
-            # (joined Arabic letters touch; Latin letters sit closer than that).
+        for text, rect in units:
+            every.append((text, rect, size))
+    # Words are made per printed line, across traces: a PDF may split one
+    # word over several runs. Arabic lines read from the right, Latin lines
+    # from the left; a stored space, a line change or a clear gap ends a word.
+    # The same letter drawn twice on one spot (fake bold) counts once.
+    kept_units: list[tuple[str, fitz.Rect, float]] = []
+    spots: dict[str, list[fitz.Rect]] = {}
+    for unit in every:
+        text, rect, size = unit
+        if not text.isspace() and any(
+            abs(r.x0 - rect.x0) < max(0.8, size * 0.12) and abs(r.y0 - rect.y0) < max(0.8, size * 0.12)
+            for r in spots.get(text, [])
+        ):
+            continue
+        spots.setdefault(text, []).append(rect)
+        kept_units.append(unit)
+    every = kept_units
+    every.sort(key=lambda u: (u[1].y0 + u[1].y1) / 2)
+    lines: list[list[tuple[str, fitz.Rect, float]]] = []
+    for unit in every:
+        middle = (unit[1].y0 + unit[1].y1) / 2
+        if lines:
+            last = lines[-1][-1]
+            if abs(middle - (last[1].y0 + last[1].y1) / 2) <= max(unit[2], last[2]) * 0.5:
+                lines[-1].append(unit)
+                continue
+        lines.append([unit])
+    for line in lines:
+        # Left to right across the line, cut into words; each Arabic word is
+        # then read from its right end. Word order does not matter here.
+        line.sort(key=lambda u: (u[1].x0 + u[1].x1))
+        pieces: list[tuple[str, fitz.Rect]] = []
+        box, previous = None, None
+        for text, rect, size in line + [(" ", None, 0.0)]:
             gap = rect is not None and previous is not None and (
-                max(rect.x0, previous.x0) - min(rect.x1, previous.x1) > size * 0.12
+                rect.x0 - previous.x1 > size * 0.18
             )
             if text.isspace() or gap:
-                if current.strip():
-                    words.append((current, box))
-                current, box = "", None
+                if pieces:
+                    letters = [t for t, _r in pieces]
+                    if sum(1 for t in letters if _ARABIC.search(t)) > len(letters) / 2:
+                        letters.reverse()
+                    joined = "".join(letters)
+                    if joined.strip():
+                        words.append((joined, box))
+                pieces, box = [], None
+                previous = None if text.isspace() else previous
                 if text.isspace():
-                    previous = None
                     continue
-            current += text
+            pieces.append((text, rect))
             box = rect if box is None else box | rect
             previous = rect
     if not words:
