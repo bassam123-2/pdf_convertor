@@ -398,6 +398,79 @@ def _pick(maps: list[EmbeddedMap], trace: dict) -> EmbeddedMap | None:
     return best
 
 
+_GARBAGE = re.compile(r"[\x00-\x1f\ufffd\ue000-\uf8ff\u0370-\u03ff\u1400-\u167f\u0180-\u024f]")
+
+
+def _garbage(char: str) -> bool:
+    """A stored value that is plainly not the glyph's letter."""
+    return bool(_GARBAGE.match(char))
+
+
+def _agreement(candidate: EmbeddedMap, trace: dict) -> tuple[int, int]:
+    """How many glyphs of a trace store the letter their shape draws, of those known."""
+    agree = known = 0
+    for raw in trace.get("chars") or []:
+        gid = int(raw[1])
+        if gid < 0:
+            continue
+        letters = candidate.letters.get(gid)
+        if not letters or letters == " ":
+            continue
+        known += 1
+        stored = _fold(chr(int(raw[0])))
+        if stored == letters or stored == letters[:1]:
+            agree += 1
+    return agree, known
+
+
+def _choose(maps: list[EmbeddedMap], trace: dict) -> tuple[EmbeddedMap | None, bool]:
+    """
+    The subset a trace was drawn with, and whether its stored values are sound.
+
+    A page can hold many fonts of one name, each numbering its glyphs its own
+    way; reading a trace with the wrong one turns "The" into "Rhe". So:
+
+    * A subset whose shapes agree with most stored letters is the one, and
+      the font is healthy: only plainly broken glyphs are replaced.
+    * When none agrees, the font map is broken. A single subset is taken; of
+      several, the one whose glyph widths match the trace, and only when they
+      match closely. Otherwise nothing is changed.
+    """
+    scored = []
+    for candidate in maps:
+        agree, known = _agreement(candidate, trace)
+        scored.append((agree / known if known else 0.0, known, candidate))
+    sound = [item for item in scored if item[1] >= 2 and item[0] >= 0.6]
+    if sound:
+        return max(sound, key=lambda item: (item[0], item[1]))[2], True
+    if not any(item[1] for item in scored):
+        return None, True
+    if len(maps) == 1:
+        return maps[0], False
+    fitting = [candidate for candidate in maps if _widths_match(candidate, trace)]
+    if len(fitting) != 1:
+        return None, True  # no subset, or more than one, fits: leave the trace alone
+    return fitting[0], False
+
+
+def _widths_match(candidate: EmbeddedMap, trace: dict) -> bool:
+    """True when the trace's glyph widths are this subset's advances, glyph for glyph."""
+    size = float(trace.get("size") or 0) or 1.0
+    checked = 0
+    for raw in trace.get("chars") or []:
+        gid = int(raw[1])
+        if gid < 0:
+            continue
+        expected = candidate.advances.get(gid)
+        if expected is None:
+            return False
+        drawn = float(raw[3][2]) - float(raw[3][0])
+        if abs(drawn - expected * size / candidate.units) > max(0.3, size * 0.03):
+            return False
+        checked += 1
+    return checked >= 3
+
+
 def _stored_disagrees(maps: list[EmbeddedMap], traces: list[dict]) -> bool:
     """True when the PDF's own values for these glyphs often differ from their shapes."""
     total = wrong = 0
@@ -461,7 +534,7 @@ def repaired_traces(page: fitz.Page, traces: list[dict]) -> list[dict]:
         if key not in broken or int(trace.get("type") or 0) != 0:
             fixed.append(trace)
             continue
-        chosen = _pick(maps[key], trace)
+        chosen, healthy = _choose(maps[key], trace)
         if chosen is None:
             fixed.append(trace)
             continue
@@ -480,6 +553,10 @@ def repaired_traces(page: fitz.Page, traces: list[dict]) -> list[dict]:
                 continue
             letters = chosen.letters.get(gid)
             stored = _fold(chr(int(raw[0])))
+            # In a healthy font only a glyph with no real letter stored (U+FFFD,
+            # a control code, a private-use or foreign-script code) is replaced.
+            if healthy and not _garbage(chr(int(raw[0]))):
+                letters = None
             if not letters or stored == letters or (len(letters) > 1 and stored == letters[0] and _next_completes(raw, trace, letters)):
                 # The PDF's own value agrees with the shape: keep it as it is.
                 last_letters = "" if not letters or len(letters) == 1 else ""

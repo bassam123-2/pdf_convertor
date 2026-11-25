@@ -58,3 +58,42 @@ def test_repair_can_be_switched_off(monkeypatch):
     page = fitz.open(BROKEN)[0]
     text = "".join(atom.text for atom in _atoms_on_page(page))
     assert not any("؀" <= char <= "ۿ" for char in text)
+
+
+def _fake_map(letters):
+    return font_repair.EmbeddedMap("TimesNewRomanPSMT", letters, {g: 500.0 for g in letters}, 1000.0, len(letters), "x")
+
+
+def _trace(text, gids, size=12.0):
+    chars = []
+    x = 100.0
+    for char, gid in zip(text, gids):
+        chars.append((ord(char), gid, (x, 100.0), (x, 90.0, x + 6.0, 102.0)))
+        x += 6.0
+    return {"type": 0, "font": "TimesNewRomanPSMT", "size": size, "bidi_lvl": 0, "chars": tuple(chars)}
+
+
+def test_a_sound_font_is_never_rewritten_from_another_subset():
+    # Two fonts of one name on a page, numbering glyphs differently.
+    right = _fake_map({1: "T", 2: "h", 3: "e"})
+    wrong = _fake_map({1: "R", 2: "h", 3: "e", 4: "T"})
+    trace = _trace("The", [1, 2, 3])
+    chosen, healthy = font_repair._choose([wrong, right], trace)
+    assert chosen is right and healthy
+
+
+def test_a_sound_font_only_loses_its_plainly_broken_glyphs():
+    sound = _fake_map({1: "T", 2: "h", 3: "e", 5: "لا"})
+    trace = _trace("The�", [1, 2, 3, 5])
+    chosen, healthy = font_repair._choose([sound], trace)
+    assert healthy
+    assert not font_repair._garbage("T") and font_repair._garbage("�")
+
+
+def test_unsure_subset_changes_nothing():
+    a = _fake_map({1: "س", 2: "ي"})
+    b = _fake_map({1: "ب", 2: "ت"})
+    trace = _trace("PQ|", [1, 2, 1])
+    # Neither agrees with the stored letters, and both fit the widths.
+    chosen, _healthy = font_repair._choose([a, b], trace)
+    assert chosen is None
