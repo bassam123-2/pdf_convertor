@@ -4242,13 +4242,23 @@ def _add_table(
         for node, dxa in zip(grid.findall(qn("w:gridCol")), column_dxa):
             node.set(qn("w:w"), str(dxa))
 
+    # The first row is a header only when its cells read like headings; a
+    # table continued from a picture can start with an ordinary data row.
+    first = [(_clean_flow_text(cell) or "") for cell in rows[0]] if rows else []
+    header_row = bool(first) and max((len(cell) for cell in first), default=0) <= 60
     for row_index, row in enumerate(rows):
         for col_index, text in enumerate(row):
             cell = table.cell(row_index, col_index)
             _set_cell_width(cell, column_dxa[col_index])
             paragraph = cell.paragraphs[0]
             paragraph.style = document.styles["Normal"]
-            _set_paragraph_rtl(paragraph, text)
+            # Each cell runs in the direction of its own letters: an English
+            # cell starts at the left even in an Arabic document.
+            latin_cell = len(re.findall(r"[A-Za-z]", text or "")) > _arabic_count(text or "")
+            if text and latin_cell and _DIRECTION.get() != "rtl" or text and len(re.findall(r"[A-Za-z]", text)) > max(3, _arabic_count(text) * 3):
+                _set_paragraph_ltr(paragraph)
+            else:
+                _set_paragraph_rtl(paragraph, text)
             paragraph.paragraph_format.space_before = Pt(0)
             paragraph.paragraph_format.space_after = Pt(0)
             paragraph.paragraph_format.line_spacing = 1.0
@@ -4256,7 +4266,7 @@ def _add_table(
             run = paragraph.add_run(text) if text else None
             font_size = max(7.5, 11.0 * block.fit_scale)
             if run is not None:
-                _set_run_font(run, font_size, row_index == 0 and block.rules and not block.fills)
+                _set_run_font(run, font_size, row_index == 0 and header_row and block.rules and not block.fills)
             if text and re.fullmatch(r"[\d٠-٩]{1,4}", text):
                 # A page number stays on the right edge of its cell.
                 paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
@@ -4272,7 +4282,7 @@ def _add_table(
                 ink = _ink_on(fill)
                 if ink is not None and run is not None:
                     run.font.color.rgb = ink
-            elif row_index == 0 and block.rules and not colored:
+            elif row_index == 0 and header_row and block.rules and not colored:
                 _shade_header(cell)
         _lock_row(table.rows[row_index])
     _pad_table_cells(table, 100 if defined else 80, 60 if defined else 40)
@@ -6042,13 +6052,26 @@ def _capture_flow(
         # editable text. The faithful reader would leave them in the picture.
         notes.append(f"Page {page_number}: read from the page picture (the font stores Arabic letters as Latin ones).")
         return _positioned(_capture_page, page, plumber_page, background_xrefs, furniture, schema, page_number, notes, options, repair)
-    if digital_layer and not (page_number == 1 and options.preserve_first_page):
+    # A page that is only a picture of a table has almost no text layer, yet
+    # its table can be read from the picture. Such a page is read here too.
+    table_picture = False
+    if not digital_layer and _page_has_images(page):
+        try:
+            from core import image_tables, table_rebuild
+
+            table_picture = image_tables.available() and any(
+                region.kind == "raster_table" for region in table_rebuild.classify_regions(page)
+            )
+        except Exception:
+            table_picture = False
+    if (digital_layer or table_picture) and not (page_number == 1 and options.preserve_first_page):
         try:
             payload = faithful.read_page(page, repair, background=False)
         except Exception as exc:
             payload = None
             notes.append(f"Page {page_number}: the flowing reader failed ({exc}); the ordinary reader was used.")
-        if payload is not None and (payload.lines or payload.tables):
+        usable_tables = [t for t in (payload.tables if payload is not None else []) if getattr(t, "usable", True) and getattr(t, "rows", None)]
+        if payload is not None and (payload.lines or payload.tables) and (digital_layer or usable_tables):
             from core.flow_layout import page_flows_well
 
             flows, why = page_flows_well(page, payload)
@@ -6212,7 +6235,9 @@ def read_word_build(
                             use_faithful = False
                         if use_faithful:
                             capture = _capture_faithful
-                        elif getattr(options, "flow", True) and not faithful_mode and strategy != "scanned":
+                        elif getattr(options, "flow", True) and not faithful_mode:
+                            # A "scanned" page may be a picture of a table; the flow
+                            # reader tries that and otherwise hands it to `fallback`.
                             capture = functools.partial(_capture_flow, fallback=fallback)
                         else:
                             capture = _capture_page

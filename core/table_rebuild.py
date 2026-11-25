@@ -994,6 +994,31 @@ def _rebuild_raster(page: fitz.Page, region: ImageRegion) -> RebuiltTable | None
     png = region.image_bytes or _extract_png(page, region.xref, region.bbox)
     if not png:
         return None
+    # First choice: find the grid in the pixels and read each cell at high
+    # resolution (img2table + Tesseract). The older word-cluster reading
+    # below stays as the fallback.
+    try:
+        from core import image_tables
+
+        found = image_tables.read_table(page, region.bbox)
+    except Exception:
+        found = None
+    if found is not None:
+        rebuilt = RebuiltTable(
+            kind="raster",
+            bbox=found.bbox,
+            rows=found.rows,
+            widths=found.widths,
+            heights=found.heights,
+            confidences=[[100.0] * len(found.rows[0]) for _ in found.rows],
+            rules=True,
+            rtl=_page_rtl(page),
+            fallback_png=png,
+            notes=[*found.notes, f"({region.reason})"],
+        )
+        rebuilt.usable = table_is_usable(rebuilt)
+        if rebuilt.usable:
+            return rebuilt
     words = _ocr_cells(png)
     if not words:
         return RebuiltTable(

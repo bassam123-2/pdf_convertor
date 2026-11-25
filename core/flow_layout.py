@@ -439,7 +439,8 @@ def blocks_from_faithful(page, payload) -> list:
             continue
         if rect.get_area() / page_area > 0.85:
             continue  # a page-sized backdrop or scan, not a figure
-        if any(fitz.Rect(t).contains(rect) for t in table_boxes):
+        # A picture a table was read from is replaced by that table.
+        if any((fitz.Rect(t) & rect).get_area() >= rect.get_area() * 0.6 for t in table_boxes):
             continue
         try:
             pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), clip=rect, alpha=False)
@@ -514,10 +515,14 @@ def page_flows_well(page, payload) -> tuple[bool, str]:
         infos = page.get_image_info() or []
     except Exception:
         infos = []
+    rebuilt = [fitz.Rect(t.bbox) for t in (getattr(payload, "tables", None) or [])
+               if getattr(t, "usable", True) and getattr(t, "rows", None)]
     for info in infos:
         rect = fitz.Rect(info.get("bbox") or (0, 0, 0, 0)) & page.rect
         if rect.is_empty or rect.width < 12 or rect.height < 12 or rect.get_area() / area > 0.85:
             continue
+        if any((box & rect).get_area() >= rect.get_area() * 0.6 for box in rebuilt):
+            continue  # this picture was a table and is written as one
         pictures += 1
         covered += rect.get_area()
     if pictures > 6 or covered / area > 0.45:
