@@ -170,6 +170,14 @@ def _trace_words(page: fitz.Page) -> list[tuple[str, fitz.Rect]]:
         traces = page.get_texttrace() or []
     except Exception:
         traces = []
+    try:
+        # Glyphs whose stored letter is wrong are read from their shapes, so
+        # the PDF is judged by what it shows, not by its broken map.
+        from core.font_repair import repaired_traces
+
+        traces = repaired_traces(page, traces)
+    except Exception:
+        pass
     for trace in traces:
         if int(trace.get("type") or 0) != 0:
             continue
@@ -182,12 +190,27 @@ def _trace_words(page: fitz.Page) -> list[tuple[str, fitz.Rect]]:
                 units[-1] = (text + char, box | rect)
                 continue
             units.append((char, rect))
-        if int(trace.get("bidi_lvl") or 0) % 2 == 1 or (
-            units and sum(1 for t, _ in units if _ARABIC.search(t)) > len(units) / 2
-            and units[0][1].x0 > units[-1][1].x0
-        ):
-            units.reverse()
+        # Read an Arabic run from right to left and a Latin run from left to
+        # right by where each glyph sits, whichever order the PDF stored
+        # them in. A ligature unit keeps its letters in their own order.
         size = float(trace.get("size") or 10)
+        if units and sum(1 for t, _ in units if _ARABIC.search(t)) > len(units) / 2:
+            # One trace may hold several lines: line by line, top to bottom,
+            # each line from its right end. A line break also ends a word.
+            ordered: list[tuple[str, fitz.Rect]] = []
+            rows: list[list[tuple[str, fitz.Rect]]] = []
+            for unit in sorted(units, key=lambda u: (u[1].y0 + u[1].y1) / 2):
+                middle = (unit[1].y0 + unit[1].y1) / 2
+                if rows and abs(middle - (rows[-1][0][1].y0 + rows[-1][0][1].y1) / 2) <= size * 0.5:
+                    rows[-1].append(unit)
+                else:
+                    rows.append([unit])
+            for row in rows:
+                ordered.extend(sorted(row, key=lambda u: -(u[1].x0 + u[1].x1)))
+                ordered.append((" ", None))
+            units = ordered[:-1]
+        elif int(trace.get("bidi_lvl") or 0) % 2 == 1:
+            units.reverse()
         current, box = "", None
         previous: fitz.Rect | None = None
         for text, rect in units + [(" ", None)]:

@@ -219,6 +219,32 @@
       "mode": "editable",
       "min_similarity": 0.5,
       "notes": "39-page Arabic compliance guide. Editable mode once wrote 166 pages: pages whose text only the page picture carries must stay positioned."
+    },
+    {
+      "id": "broken_cmap_arabic",
+      "file": "files/broken_cmap_arabic.pdf",
+      "producer": "synthetic (Noto Naskh Arabic, ToUnicode replaced with Latin letters and symbols)",
+      "language": "ar",
+      "structure": ["two lines"],
+      "graphics": [],
+      "font_issues": ["every glyph stored as a Latin letter or symbol, as macOS Quartz does with some Arabic fonts"],
+      "orientation": "landscape",
+      "mode": "editable",
+      "min_similarity": 0.5,
+      "notes": "Read from glyph shapes when Noto Naskh Arabic is installed."
+    },
+    {
+      "id": "ligature_split_arabic",
+      "file": "files/ligature_split_arabic.pdf",
+      "producer": "PyMuPDF insert_htmlbox (Noto Naskh Arabic)",
+      "language": "ar",
+      "structure": ["two lines"],
+      "graphics": [],
+      "font_issues": ["lam-alef drawn as two glyphs and stored as U+FFFD and control codes"],
+      "orientation": "landscape",
+      "mode": "editable",
+      "min_similarity": 0.5,
+      "notes": "Read from glyph shapes when Noto Naskh Arabic is installed."
     }
   ],
   "missing_categories": [

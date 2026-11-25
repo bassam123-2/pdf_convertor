@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import contextvars
 import copy
+import os
 import functools
 import re
 import sys
@@ -367,6 +368,7 @@ def _atoms_on_page(page: fitz.Page, upright_only: bool = False) -> list[_Atom]:
         traces = page.get_texttrace() or []
     except Exception:
         return atoms
+    traces = _shape_repaired(page, traces)
     for trace in traces:
         if int(trace.get("type") or 0) != 0:
             continue
@@ -424,6 +426,18 @@ def _atoms_on_page(page: fitz.Page, upright_only: bool = False) -> list[_Atom]:
     _repair_ligatures(page, atoms)
     atoms.extend(_gap_spaces(atoms))
     return atoms
+
+
+def _shape_repaired(page: fitz.Page, traces: list) -> list:
+    """Traces whose wrongly mapped glyphs are read from their outlines (see font_repair)."""
+    if os.environ.get("PDF_TOOL_SHAPE_REPAIR", "1") == "0":
+        return traces
+    try:
+        from core.font_repair import repaired_traces
+
+        return repaired_traces(page, traces)
+    except Exception:
+        return traces
 
 
 def _repair_ligatures(page: fitz.Page, atoms: list[_Atom]) -> None:
