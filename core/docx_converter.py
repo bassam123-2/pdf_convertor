@@ -3694,6 +3694,28 @@ def _image_bytes(page: fitz.Page, xref: int) -> bytes | None:
             return fitz.Pixmap(base, mask).tobytes("png")
         except Exception:
             pass
+        try:
+            # Older PyMuPDF builds cannot join a mask to a picture; Pillow can.
+            from PIL import Image
+
+            base = fitz.Pixmap(document, xref)
+            if base.alpha:
+                base = fitz.Pixmap(base, 0)
+            if base.colorspace is None or base.colorspace.n != 3:
+                base = fitz.Pixmap(fitz.csRGB, base)
+            mask = fitz.Pixmap(document, smask)
+            if mask.alpha or (mask.colorspace is not None and mask.colorspace.n != 1):
+                mask = fitz.Pixmap(fitz.csGRAY, mask)
+            picture = Image.frombytes("RGB", (base.width, base.height), base.samples)
+            alpha = Image.frombytes("L", (mask.width, mask.height), mask.samples)
+            if alpha.size != picture.size:
+                alpha = alpha.resize(picture.size)
+            picture.putalpha(alpha)
+            out = BytesIO()
+            picture.save(out, format="PNG")
+            return out.getvalue()
+        except Exception:
+            pass
     try:
         return document.extract_image(xref).get("image")
     except Exception:
