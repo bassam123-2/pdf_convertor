@@ -108,6 +108,17 @@ def _glyph_text(font) -> dict[str, str]:
                     if source in text and target not in text:
                         text[target] = text[source]
                         changed = True
+            elif kind == "MultipleSubst":
+                # One glyph drawn as several: the first carries the letter.
+                for source, targets in (getattr(sub, "mapping", None) or {}).items():
+                    if source in text and targets:
+                        if targets[0] not in text:
+                            text[targets[0]] = text[source]
+                            changed = True
+                        for extra in targets[1:]:
+                            if extra not in text:
+                                text[extra] = ""
+                                changed = True
             elif kind == "AlternateSubst":
                 for source, targets in (getattr(sub, "alternates", None) or {}).items():
                     for target in targets:
@@ -423,6 +434,35 @@ def _agreement(candidate: EmbeddedMap, trace: dict) -> tuple[int, int]:
     return agree, known
 
 
+def _evidence(candidate: EmbeddedMap, trace: dict) -> bool:
+    """
+    True when a trace is plainly misread, not merely read differently.
+
+    Either glyphs store no real letter (U+FFFD, control, private-use or
+    foreign-script codes), or the shapes are Arabic letters while the stored
+    values are Latin letters, digits or symbols (the macOS case). A Latin
+    trace whose shapes read as other Latin letters is far more likely read
+    with the wrong subset than broken, so it never counts.
+    """
+    garbage = arabic_shape_latin_store = known = 0
+    for raw in trace.get("chars") or []:
+        gid = int(raw[1])
+        if gid < 0:
+            continue
+        stored = chr(int(raw[0]))
+        if _garbage(stored):
+            garbage += 1
+        letters = candidate.letters.get(gid)
+        if not letters or letters.isspace():
+            continue
+        known += 1
+        if _ARABIC.search(letters) and not _ARABIC.search(stored) and not stored.isspace():
+            arabic_shape_latin_store += 1
+    if garbage:
+        return True
+    return known >= 2 and arabic_shape_latin_store >= known * 0.5
+
+
 def _choose(maps: list[EmbeddedMap], trace: dict) -> tuple[EmbeddedMap | None, bool]:
     """
     The subset a trace was drawn with, and whether its stored values are sound.
@@ -440,17 +480,60 @@ def _choose(maps: list[EmbeddedMap], trace: dict) -> tuple[EmbeddedMap | None, b
     for candidate in maps:
         agree, known = _agreement(candidate, trace)
         scored.append((agree / known if known else 0.0, known, candidate))
-    sound = [item for item in scored if item[1] >= 2 and item[0] >= 0.6]
+    sound = [item for item in scored if item[1] >= 1 and item[0] >= 0.6]
     if sound:
-        return max(sound, key=lambda item: (item[0], item[1]))[2], True
+        return max(sound, key=lambda item: (item[0], item[1], _width_share(item[2], trace)))[2], True
     if not any(item[1] for item in scored):
         return None, True
-    if len(maps) == 1:
-        return maps[0], False
-    fitting = [candidate for candidate in maps if _widths_match(candidate, trace)]
-    if len(fitting) != 1:
-        return None, True  # no subset, or more than one, fits: leave the trace alone
-    return fitting[0], False
+    # The widths name one subset: take it, even if it knows only some glyphs.
+    measured = [candidate for candidate in maps if _width_share(candidate, trace) >= 0.85 and _covers(candidate, trace) > 0]
+    if len(measured) == 1:
+        return (measured[0], False) if _evidence(measured[0], trace) else (None, True)
+    # Broken, or read with a font this page names twice but only one of whose
+    # copies could be matched: the glyph widths must say which subset it is.
+    readable = [candidate for candidate in maps if _covers(candidate, trace) >= 0.9]
+    if not readable:
+        return None, True
+    # Several subsets that read this trace the same way: any of them will do.
+    readings = {_reading(candidate, trace) for candidate in readable}
+    if len(readings) == 1:
+        chosen = readable[0]
+    else:
+        fitting = [candidate for candidate in readable if _width_share(candidate, trace) >= 0.85]
+        if not fitting or len({_reading(candidate, trace) for candidate in fitting}) != 1:
+            return None, True  # the subsets disagree and the widths do not settle it
+        chosen = fitting[0]
+    return (chosen, False) if _evidence(chosen, trace) else (None, True)  # the subsets disagree and the widths do not settle it
+
+
+def _covers(candidate: EmbeddedMap, trace: dict) -> float:
+    """Share of the trace's drawn glyphs this subset knows the letters of."""
+    glyphs = [int(raw[1]) for raw in trace.get("chars") or [] if int(raw[1]) >= 0 and not chr(int(raw[0])).isspace()]
+    if not glyphs:
+        return 0.0
+    return sum(1 for gid in glyphs if gid in candidate.letters) / len(glyphs)
+
+
+def _reading(candidate: EmbeddedMap, trace: dict) -> str:
+    return "".join(candidate.letters.get(int(raw[1]), "?") for raw in trace.get("chars") or [] if int(raw[1]) >= 0)
+
+
+def _width_share(candidate: EmbeddedMap, trace: dict) -> float:
+    """Share of the trace's glyphs drawn exactly as wide as this subset's advances."""
+    size = float(trace.get("size") or 0) or 1.0
+    checked = good = 0
+    for raw in trace.get("chars") or []:
+        gid = int(raw[1])
+        if gid < 0:
+            continue
+        checked += 1
+        expected = candidate.advances.get(gid)
+        if expected is None:
+            continue
+        drawn = float(raw[3][2]) - float(raw[3][0])
+        if abs(drawn - expected * size / candidate.units) <= max(0.3, size * 0.03):
+            good += 1
+    return good / checked if checked else 0.0
 
 
 def _widths_match(candidate: EmbeddedMap, trace: dict) -> bool:
@@ -554,8 +637,12 @@ def repaired_traces(page: fitz.Page, traces: list[dict]) -> list[dict]:
             letters = chosen.letters.get(gid)
             stored = _fold(chr(int(raw[0])))
             # In a healthy font only a glyph with no real letter stored (U+FFFD,
-            # a control code, a private-use or foreign-script code) is replaced.
-            if healthy and not _garbage(chr(int(raw[0]))):
+            # a control code, a private-use or foreign-script code) is replaced,
+            # or an Arabic shape stored as a digit, Latin letter or symbol.
+            if healthy and letters and not (
+                _garbage(chr(int(raw[0])))
+                or (_ARABIC.search(letters) and not _ARABIC.search(stored) and not stored.isspace())
+            ):
                 letters = None
             if not letters or stored == letters or (len(letters) > 1 and stored == letters[0] and _next_completes(raw, trace, letters)):
                 # The PDF's own value agrees with the shape: keep it as it is.

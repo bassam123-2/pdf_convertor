@@ -627,7 +627,8 @@ def _reread_cells(page: fitz.Page, bbox: tuple, rows: list[list[str]], widths: l
     if not rows or len(widths) != cols or len(heights) != len(rows):
         return rows
     try:
-        from core.docx_converter import _atoms_on_page, _separate_overlapping_atoms, _text_inside
+        from core.docx_converter import _atoms_in, _atoms_on_page, _cluster_baselines, _logical_text, _separate_overlapping_atoms
+        from core.arabic_fixer import plain_arabic
         from core.faithful import _dedupe_fake_bold
 
         atoms = _separate_overlapping_atoms(_dedupe_fake_bold(_atoms_on_page(page, upright_only=True)))
@@ -645,7 +646,10 @@ def _reread_cells(page: fitz.Page, bbox: tuple, rows: list[list[str]], widths: l
         for c in range(cols):
             old = row[c] if c < len(row) else ""
             box = (x_edges[c], y_edges[r], x_edges[c + 1], y_edges[r + 1])
-            text = _text_inside(atoms, box).strip()
+            # One line of the cell per printed line: the line breaks say how
+            # wide the column must be, and Word keeps them.
+            lines = [plain_arabic(_logical_text(band)).strip() for band in _cluster_baselines(_atoms_in(atoms, box))]
+            text = "\n".join(line for line in lines if line)
             cells.append(text or old)
         fresh.append(cells)
     return fresh

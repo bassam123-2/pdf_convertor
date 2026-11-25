@@ -500,6 +500,14 @@ def page_flows_well(page, payload) -> tuple[bool, str]:
     if any(note.startswith("Chart/figure") and "overlapping text labels" in note for note in payload.notes):
         return False, "a figure carries text labels"
     area = float(page.rect.width * page.rect.height) or 1.0
+    # A table that could not be rebuilt is written as its picture. When that
+    # picture is a large share of the page, its words would be lost in flow.
+    for table in getattr(payload, "tables", None) or []:
+        if getattr(table, "usable", True) and getattr(table, "rows", None):
+            continue
+        box = fitz.Rect(table.bbox) & page.rect
+        if not box.is_empty and box.get_area() / area > 0.2:
+            return False, f"a table that could not be rebuilt covers {box.get_area() / area:.0%} of the page"
     pictures = 0
     covered = 0.0
     try:
