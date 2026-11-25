@@ -19,7 +19,8 @@ _COLS = 3
 def page_is_ruled(page: fitz.Page) -> bool:
     """True when the page is crossed by several long horizontal rules."""
     try:
-        drawings = page.get_drawings()
+        from core.table_rebuild import visible_drawings
+        drawings = visible_drawings(page)
     except Exception:
         return False
     rules = 0

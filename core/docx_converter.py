@@ -688,7 +688,8 @@ def _drawing_paints(page: fitz.Page) -> list[tuple]:
     """Colored rectangles on the page, skipping white paper."""
     paints = []
     try:
-        drawings = page.get_drawings()
+        from core.table_rebuild import visible_drawings
+        drawings = visible_drawings(page)
     except Exception:
         return paints
     for drawing in drawings:
@@ -1938,7 +1939,8 @@ def _drawing_shapes(page: fitz.Page) -> list[tuple]:
     shapes = []
     page_area = float(page.rect.width * page.rect.height) or 1.0
     try:
-        drawings = page.get_drawings()
+        from core.table_rebuild import visible_drawings
+        drawings = visible_drawings(page)
     except Exception:
         return shapes
     for drawing in drawings:
@@ -2028,7 +2030,8 @@ def _diagram_parts(page: fitz.Page) -> list[tuple[tuple[float, float, float, flo
     page_area = width * height or 1.0
     parts: list[tuple[tuple[float, float, float, float], tuple | None]] = []
     try:
-        drawings = page.get_drawings()
+        from core.table_rebuild import visible_drawings
+        drawings = visible_drawings(page)
     except Exception:
         return parts
     for drawing in drawings:
@@ -2503,7 +2506,8 @@ def _container_boxes(page: fitz.Page) -> list[tuple[float, float, float, float]]
     page_area = float(page.rect.width * page.rect.height) or 1.0
     boxes: list[tuple[float, float, float, float]] = []
     try:
-        drawings = page.get_drawings()
+        from core.table_rebuild import visible_drawings
+        drawings = visible_drawings(page)
     except Exception:
         drawings = []
     for drawing in drawings:
@@ -3144,6 +3148,8 @@ def extract_page(
         )
         figures = _release_text_panels(figures, atoms)
         tables = _without_figure_tables(tables, figures)
+        if reading == "digital":
+            tables += _coloured_tables(page, tables)
     if mode == "blocks":
         paragraphs = _paragraphs_from_regions(page, atoms, tables, figures)
     else:
@@ -3159,6 +3165,36 @@ def extract_page(
     flow.extend(pending)
     _strip_stamps(flow)
     return _group_with_containers(page, flow)
+
+
+def _coloured_tables(page: fitz.Page, found: list) -> list:
+    """
+    Tables drawn as a column of filled label cells with no rules.
+
+    The ruled-grid finders above cannot see them; the coloured-cell reader
+    of table_rebuild can. A table already found over the same area wins.
+    """
+    try:
+        from core import table_rebuild
+    except Exception:
+        return []
+    extra = []
+    try:
+        rebuilt = table_rebuild.fill_tables(page)
+    except Exception:
+        return []
+    for table in rebuilt:
+        box = tuple(float(v) for v in table.bbox)
+        if any(_overlap_ratio(box, other.bbox) > 0.3 for other in found):
+            continue
+        extra.append(TableBlock(
+            bbox=box,
+            rows=[list(row) for row in table.rows],
+            fills=[list(row) for row in (table.fills or [])],
+            widths=list(table.widths or []),
+            rules=False,
+        ))
+    return extra
 
 
 def _retry_mode(report: dict, digital_layer: bool) -> str:
@@ -3270,7 +3306,8 @@ def _cover_logos(page: fitz.Page, atoms: list[_Atom], background_xrefs: set[int]
         return logos
     marks: list[tuple[float, float, float, float]] = []
     try:
-        drawings = page.get_drawings()
+        from core.table_rebuild import visible_drawings
+        drawings = visible_drawings(page)
     except Exception:
         drawings = []
     for drawing in drawings:
@@ -4595,7 +4632,8 @@ def _body_insets(page: fitz.Page) -> tuple[float, float, float, float]:
         lefts.append(box[0])
         rights.append(max(0.0, width - box[2]))
     try:
-        drawings = page.get_drawings()
+        from core.table_rebuild import visible_drawings
+        drawings = visible_drawings(page)
     except Exception:
         drawings = []
     for drawing in drawings:
@@ -4655,7 +4693,8 @@ def _header_art(page: fitz.Page) -> tuple[float, float, float, float] | None:
         elif box[3] <= band and (box[3] - box[1]) >= 8 and (box[2] - box[0]) >= 8:
             boxes.append(box)
     try:
-        drawings = page.get_drawings()
+        from core.table_rebuild import visible_drawings
+        drawings = visible_drawings(page)
     except Exception:
         drawings = []
     for drawing in drawings:
@@ -4848,7 +4887,8 @@ def _footer_rule(page: fitz.Page) -> bool:
     """A vertical stroke in the footer band, between the page-word and the number."""
     height = float(page.rect.height)
     try:
-        drawings = page.get_drawings()
+        from core.table_rebuild import visible_drawings
+        drawings = visible_drawings(page)
     except Exception:
         return False
     for drawing in drawings:
@@ -4963,7 +5003,8 @@ def _filled_band(page: fitz.Page, edge: str) -> tuple[float, float] | None:
         if bbox:
             keep((float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])))
     try:
-        drawings = page.get_drawings()
+        from core.table_rebuild import visible_drawings
+        drawings = visible_drawings(page)
     except Exception:
         drawings = []
     for drawing in drawings:

@@ -166,7 +166,8 @@ def _fill_regions(page: fitz.Page) -> list[tuple[float, float, float, float, flo
     """Filled shapes and pictures: the panels a block of text can sit on."""
     regions = []
     try:
-        drawings = page.get_drawings()
+        from core.table_rebuild import visible_drawings
+        drawings = visible_drawings(page)
     except Exception:
         drawings = []
     for drawing in drawings:
@@ -197,7 +198,8 @@ def _vertical_rules(page: fitz.Page) -> list[tuple[float, float, float]]:
     """Upright lines on the page, such as the rules between table columns."""
     rules: list[tuple[float, float, float]] = []
     try:
-        drawings = page.get_drawings()
+        from core.table_rebuild import visible_drawings
+        drawings = visible_drawings(page)
     except Exception:
         return rules
     for drawing in drawings:

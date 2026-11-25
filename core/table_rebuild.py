@@ -320,7 +320,7 @@ def _filled_boxes(page: fitz.Page) -> list[tuple[fitz.Rect, tuple]]:
     boxes = []
     width = float(page.rect.width)
     try:
-        drawings = page.get_drawings()
+        drawings = visible_drawings(page)
     except Exception:
         return boxes
     for drawing in drawings:
@@ -399,6 +399,41 @@ def _fill_tables(page: fitz.Page, atoms: list[tuple]) -> list[ImageRegion]:
                 f"{len(run)} filled label cells with text beside them",
                 geometry={"rows": [(r.y0, r.y1) for r in run], "edges": edges, "label": label, "colour": colour},
             ))
+    # Two such "tables" over one area are columns of one coloured grid (an
+    # infographic), not a label column with its text: leave them all alone.
+    # Two stacks in the same column (a cell drawn as a frame and a fill) are
+    # one table: the one with more rows stays.
+    def label_span(region):
+        edges = region.geometry["edges"]
+        label = region.geometry["label"]
+        return edges[label], edges[label + 1]
+
+    def same_column(a, b) -> bool:
+        a0, a1 = label_span(a)
+        b0, b1 = label_span(b)
+        return min(a1, b1) - max(a0, b0) >= min(a1 - a0, b1 - b0) * 0.5
+
+    found.sort(key=lambda region: -len(region.geometry["rows"]))
+    kept: list[ImageRegion] = []
+    for region in found:
+        if any(same_column(region, other) and _overlap_ratio(region.bbox, other.bbox) > 0.15 for other in kept):
+            continue
+        kept.append(region)
+    clash = set()
+    for i, a in enumerate(kept):
+        for j, b in enumerate(kept[i + 1:], start=i + 1):
+            if _overlap_ratio(a.bbox, b.bbox) > 0.15 or _overlap_ratio(b.bbox, a.bbox) > 0.15:
+                clash.update((i, j))
+    return [region for index, region in enumerate(kept) if index not in clash]
+
+
+def fill_tables(page: fitz.Page) -> list[RebuiltTable]:
+    """Coloured-cell tables only (see _fill_tables), for readers that find their own ruled grids."""
+    found = []
+    for region in _fill_tables(page, _text_boxes(page)):
+        table = _rebuild_fill(page, region)
+        if table is not None and table.usable and table.rows:
+            found.append(table)
     return found
 
 
@@ -844,12 +879,49 @@ def _reread_cells(page: fitz.Page, bbox: tuple, rows: list[list[str]], widths: l
     return fresh
 
 
+def visible_drawings(page: fitz.Page) -> list[dict]:
+    """
+    The page's drawings as they show: invisible paint taken away.
+
+    A PDF can paint a rectangle at opacity 0, as Word and PDF tools do under
+    linked contents entries and highlights. Read by colour alone, such a
+    rectangle is a black bar. A fill or a stroke drawn at less than half
+    opacity is dropped; a drawing left with neither is left out.
+    """
+    try:
+        drawings = page.get_drawings() or []
+    except Exception:
+        return []
+    shown: list[dict] = []
+    for drawing in drawings:
+        fill_alpha = drawing.get("fill_opacity")
+        stroke_alpha = drawing.get("stroke_opacity")
+        fill = drawing.get("fill")
+        color = drawing.get("color")
+        if fill is not None and fill_alpha is not None and float(fill_alpha) < 0.5:
+            fill = None
+        if color is not None and stroke_alpha is not None and float(stroke_alpha) < 0.5:
+            color = None
+        if fill is None and color is None:
+            continue
+        if fill is not drawing.get("fill") or color is not drawing.get("color"):
+            drawing = dict(drawing)
+            drawing["fill"] = fill
+            drawing["color"] = color
+            if fill is None and drawing.get("type") in {"f", "fs"}:
+                drawing["type"] = "s"
+            if color is None and drawing.get("type") in {"s", "fs"}:
+                drawing["type"] = "f"
+        shown.append(drawing)
+    return shown
+
+
 def _ruling_lines(page: fitz.Page) -> tuple[list[tuple[float, float, float]], list[tuple[float, float, float]]]:
     """Vertical rules as (x, y0, y1) and horizontal rules as (y, x0, x1)."""
     verticals: list[tuple[float, float, float]] = []
     horizontals: list[tuple[float, float, float]] = []
     try:
-        drawings = page.get_drawings()
+        drawings = visible_drawings(page)
     except Exception:
         return verticals, horizontals
     for drawing in drawings:

@@ -208,3 +208,68 @@ def test_link_box_holds_no_visible_copy_of_the_address(tmp_path):
     with zipfile.ZipFile(out) as package:
         xml = package.read("word/document.xml").decode("utf-8")
     assert ">Page " not in xml
+
+
+# --- invisible paint and coloured-cell tables -------------------------------
+
+
+def _invisible_box_pdf(path):
+    document = fitz.open()
+    page = document.new_page(width=595, height=842)
+    # A black rectangle at opacity 0 under a heading, as Word leaves under
+    # linked contents entries.
+    page.draw_rect(fitz.Rect(60, 90, 400, 112), color=None, fill=(0, 0, 0), fill_opacity=0)
+    page.insert_text((70, 106), "Contents entry under an invisible box", fontsize=12)
+    for row in range(6):
+        page.insert_text((70, 160 + row * 20), f"Body line {row} with ordinary words in it", fontsize=11)
+    document.save(path)
+
+
+def test_invisible_paint_is_not_a_black_bar(tmp_path):
+    from core.docx_converter import _drawing_paints
+    from core.table_rebuild import visible_drawings
+
+    pdf = tmp_path / "invisible.pdf"
+    _invisible_box_pdf(pdf)
+    page = fitz.open(pdf)[0]
+    assert page.get_drawings()  # the PDF does hold the rectangle
+    assert visible_drawings(page) == []
+    assert _drawing_paints(page) == []
+    out = tmp_path / "invisible.docx"
+    for mode in ("editable", "faithful"):
+        convert_arabic_pdf_to_docx(pdf, out, options=WordOptions(mode=mode))
+        with zipfile.ZipFile(out) as package:
+            xml = package.read("word/document.xml").decode("utf-8")
+        assert 'val="000000"' not in xml.replace('w:color w:val="000000"', "")
+
+
+def _colour_table_pdf(path):
+    document = fitz.open()
+    page = document.new_page(width=595, height=842)
+    terms = ["Kingdom", "System", "Rules", "Guide", "Authority"]
+    for row, term in enumerate(terms):
+        top = 150 + row * 26
+        page.draw_rect(fitz.Rect(440, top, 540, top + 26), color=None, fill=(0.16, 0.73, 0.69))
+        page.insert_text((450, top + 17), term, fontsize=11, color=(1, 1, 1))
+        page.insert_text((80, top + 17), f"The meaning of {term.lower()} in this guide", fontsize=11)
+    document.save(path)
+
+
+def test_coloured_cell_table_is_a_table_in_both_readers(tmp_path):
+    import pdfplumber
+
+    from core.docx_converter import TableBlock, extract_page
+
+    pdf = tmp_path / "colour_table.pdf"
+    _colour_table_pdf(pdf)
+    page = fitz.open(pdf)[0]
+    with pdfplumber.open(pdf) as plumber:
+        blocks = extract_page(page, plumber.pages[0], set(), {}, "auto")
+    tables = [b for b in blocks if isinstance(b, TableBlock)]
+    assert len(tables) == 1 and len(tables[0].rows) == 5
+    assert tables[0].rows[0][1] == "Kingdom"
+    out = tmp_path / "colour_table.docx"
+    convert_arabic_pdf_to_docx(pdf, out, options=WordOptions(mode="editable"))
+    with zipfile.ZipFile(out) as package:
+        xml = package.read("word/document.xml").decode("utf-8")
+    assert "<w:tbl>" in xml and "Authority" in xml
