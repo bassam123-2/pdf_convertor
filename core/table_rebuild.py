@@ -12,6 +12,8 @@ picture; those labels must never become free-floating text atoms.
 
 from __future__ import annotations
 
+from core.safe_tables import find_tables as _safe_find_tables
+
 import re
 import subprocess
 import tempfile
@@ -66,6 +68,16 @@ class RebuiltTable:
     # When False, Word keeps the picture visible and the native grid is withheld
     # (still reported) so a weak OCR pass never silently replaces a clear plate.
     usable: bool = True
+    # Per row, the columns each cell covers: (first, last). Empty: one cell per column.
+    spans: list[list[tuple[int, int]]] = field(default_factory=list)
+    # Pictures printed inside cells: (row, column, image bytes, width pt, height pt).
+    images: list[tuple] = field(default_factory=list)
+    # Styled runs per cell, {(row, column): [(text, bold, italic, colour)]}.
+    styles: dict = field(default_factory=dict)
+    # Every cell's text centred (cards).
+    centered: bool = False
+    # {(row, column): (horizontal, vertical)} as the printed cell sets its text.
+    aligns: dict = field(default_factory=dict)
 
 
 def table_columns_too_narrow(table: RebuiltTable) -> bool:
@@ -188,9 +200,21 @@ def classify_regions(page: fitz.Page) -> list[ImageRegion]:
     text = page.get_text("text") or ""
     atoms = _text_boxes(page)
 
+    # Tables whose thin borders close every row: the borders are the grid.
+    ruled = []
+    for columns, rows_y, _cells in rule_grids(page):
+        bbox = (columns[0], rows_y[0], columns[-1], rows_y[-1])
+        inside = sum(1 for box in atoms if _center_inside(box, bbox))
+        if inside >= 3:
+            ruled.append(ImageRegion("rule_table", bbox, f"drawn borders close {len(rows_y) - 1} rows"))
+    regions.extend(ruled)
+
+    def _over_rules(bbox) -> bool:
+        return any(_overlap_ratio(bbox, r.bbox) > 0.3 or _overlap_ratio(r.bbox, bbox) > 0.3 for r in ruled)
+
     # Vector / text tables from PyMuPDF.
     try:
-        found = page.find_tables(vertical_strategy="lines", horizontal_strategy="lines")
+        found = _safe_find_tables(page, vertical_strategy="lines", horizontal_strategy="lines")
         tables = list(getattr(found, "tables", None) or [])
     except Exception:
         tables = []
@@ -198,6 +222,8 @@ def classify_regions(page: fitz.Page) -> list[ImageRegion]:
         bbox = tuple(float(v) for v in table.bbox)
         inside = sum(1 for box in atoms if _center_inside(box, bbox))
         if inside < 4 or (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) <= page_area * 0.02:
+            continue
+        if _over_rules(bbox):
             continue
         if _is_prose_column_frame(page, table):
             # Leave as flowing/faithful text; do not rebuild as w:tbl.
@@ -215,6 +241,8 @@ def classify_regions(page: fitz.Page) -> list[ImageRegion]:
     # a line finder may take for a ruled grid, which then splits its rows
     # badly; over the same area the coloured-cell reading wins.
     for region in _fill_tables(page, atoms):
+        if _over_rules(region.bbox):
+            continue
         regions = [
             r for r in regions
             if not (r.kind == "vector_table" and (_overlap_ratio(r.bbox, region.bbox) > 0.3 or _overlap_ratio(region.bbox, r.bbox) > 0.3))
@@ -226,16 +254,23 @@ def classify_regions(page: fitz.Page) -> list[ImageRegion]:
         infos = page.get_image_info(xrefs=True) or []
     except Exception:
         infos = []
+    cards = card_rows(page, atoms, infos)
+    for row in cards:
+        bbox = (min(c[0] for c in row), min(c[1] for c in row), max(c[2] for c in row), max(c[3] for c in row))
+        regions.append(ImageRegion("card_table", bbox, f"{len(row)} cards side by side, text printed on each"))
+    carded = [card for row in cards for card in row]
     for info in infos:
         box = info.get("bbox")
         if not box:
             continue
         bbox = (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
+        if any(_overlap_ratio(bbox, card) > 0.8 for card in carded):
+            continue
         area = max(1.0, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
         if area < page_area * 0.03:
             continue
         # Skip if already covered by a vector table.
-        if any(r.kind == "vector_table" and _overlap_ratio(bbox, r.bbox) > 0.5 for r in regions):
+        if any(r.kind in {"vector_table", "rule_table"} and _overlap_ratio(bbox, r.bbox) > 0.5 for r in regions):
             continue
         xref = int(info.get("xref") or 0) or None
         if int(info.get("width") or 99) <= 4 or int(info.get("height") or 99) <= 4:
@@ -349,11 +384,251 @@ def _build_tables(page: fitz.Page, regions: list[ImageRegion]) -> list[RebuiltTa
             item = _rebuild_raster(page, region)
             if item is not None:
                 rebuilt.append(item)
+        elif region.kind == "card_table":
+            item = _rebuild_cards(page, region)
+            if item is not None:
+                rebuilt.append(item)
+        elif region.kind == "rule_table":
+            item = _rebuild_rules(page, region)
+            if item is not None:
+                rebuilt.append(item)
         elif region.kind == "fill_table":
             item = _rebuild_fill(page, region)
             if item is not None:
                 rebuilt.append(item)
     return rebuilt
+
+
+def split_open_spans(row: list[tuple[int, int]], columns: list[float], top: float, bottom: float, atoms: list) -> list[tuple[int, int]]:
+    """
+    Split a cell that no border divides where its text falls apart anyway.
+
+    A shaded header row is often drawn with no inner borders. Its words
+    still sit in the columns below; no word crosses the column edge.
+    """
+    out: list[tuple[int, int]] = []
+    for first, last in row:
+        if last == first:
+            out.append((first, last))
+            continue
+        inside = [
+            atom for atom in atoms
+            if columns[first] <= (atom.x0 + atom.x1) / 2 <= columns[last + 1] and top <= (atom.y0 + atom.y1) / 2 <= bottom
+            and (atom.text or "").strip()
+        ]
+        start = first
+        for k in range(first + 1, last + 1):
+            edge = columns[k]
+            crossed = any(atom.x0 < edge - 0.5 and atom.x1 > edge + 0.5 for atom in inside)
+            # A run of words that leaps over the edge with one space is a phrase.
+            near_left = [atom.x1 for atom in inside if atom.x1 <= edge + 0.5]
+            near_right = [atom.x0 for atom in inside if atom.x0 >= edge - 0.5]
+            gap = (min(near_right) - max(near_left)) if near_left and near_right else 1e9
+            if not crossed and near_left and near_right and gap > 6.0:
+                out.append((start, k - 1))
+                start = k
+        out.append((start, last))
+    return out
+
+
+def cell_pictures(page: fitz.Page, columns: list[float], rows_y: list[float], cells: list[list[tuple[int, int]]]) -> list[tuple]:
+    """Pictures that sit inside one cell of a ruled table, as (row, column, bytes, w, h)."""
+    found: list[tuple] = []
+    try:
+        from core.docx_converter import _image_bytes
+
+        infos = page.get_image_info(xrefs=True) or []
+    except Exception:
+        return found
+    for info in infos:
+        box = info.get("bbox")
+        xref = int(info.get("xref") or 0)
+        if not box or not xref:
+            continue
+        x0, y0, x1, y1 = (float(v) for v in box)
+        if x1 - x0 < 12 or y1 - y0 < 12:
+            continue
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        for r, row in enumerate(cells):
+            if not (rows_y[r] <= cy <= rows_y[r + 1]):
+                continue
+            for first, last in row:
+                left, right = columns[first], columns[last + 1]
+                if left <= cx <= right and x0 >= left - 3 and x1 <= right + 3 and y0 >= rows_y[r] - 3 and y1 <= rows_y[r + 1] + 3:
+                    data = _image_bytes(page, xref)
+                    if data:
+                        found.append((r, first, data, x1 - x0, y1 - y0))
+    return found
+
+
+def card_rows(page: fitz.Page, atoms: list[tuple], infos: list[dict] | None = None) -> list[list[tuple]]:
+    """
+    Rows of cards: two or more pictures of one size side by side, text on each.
+
+    A designer's card (a framed box with an icon) is often a picture, with
+    its words printed over it in the text layer. Read as a figure, the
+    cards' lines run together across the row. Each card is one cell.
+    """
+    if infos is None:
+        try:
+            infos = page.get_image_info(xrefs=True) or []
+        except Exception:
+            infos = []
+    page_area = max(1.0, float(page.rect.width) * float(page.rect.height))
+    boxes = []
+    for info in infos:
+        box = info.get("bbox")
+        if not box or int(info.get("width") or 0) <= 4 or int(info.get("height") or 0) <= 4:
+            continue
+        x0, y0, x1, y1 = (float(v) for v in box)
+        w, h = x1 - x0, y1 - y0
+        if w * h < page_area * 0.015 or w > page.rect.width * 0.6 or x0 < -1 or x1 > page.rect.width + 1:
+            continue
+        words = sum(1 for a in atoms if x0 <= (a[0] + a[2]) / 2 <= x1 and y0 <= (a[1] + a[3]) / 2 <= y1)
+        if words < 3:
+            continue
+        boxes.append((x0, y0, x1, y1))
+    boxes.sort(key=lambda b: (b[1], b[0]))
+    rows: list[list[tuple]] = []
+    used: set[int] = set()
+    for i, first in enumerate(boxes):
+        if i in used:
+            continue
+        row = [first]
+        for j in range(i + 1, len(boxes)):
+            if j in used:
+                continue
+            other = boxes[j]
+            hf, ho = first[3] - first[1], other[3] - other[1]
+            wf, wo = first[2] - first[0], other[2] - other[0]
+            shared = min(first[3], other[3]) - max(first[1], other[1])
+            if shared < 0.8 * max(hf, ho) or abs(wf - wo) > 0.25 * max(wf, wo):
+                continue
+            if any(min(card[2], other[2]) - max(card[0], other[0]) > 4 for card in row):
+                continue
+            row.append(other)
+            used.add(j)
+        if len(row) >= 2:
+            used.add(i)
+            rows.append(sorted(row, key=lambda b: b[0]))
+    return rows
+
+
+def _rebuild_cards(page: fitz.Page, region: ImageRegion) -> RebuiltTable | None:
+    """One row of cards as one table row: each card's picture top, then its words."""
+    try:
+        from core.docx_converter import _atoms_in, _atoms_on_page, _cell_runs, _cluster_baselines, _separate_overlapping_atoms
+        from core.faithful import _dedupe_fake_bold
+
+        atoms = _separate_overlapping_atoms(_dedupe_fake_bold(_atoms_on_page(page, upright_only=True)))
+    except Exception:
+        return None
+    for row in card_rows(page, _text_boxes(page)):
+        bbox = (min(c[0] for c in row), min(c[1] for c in row), max(c[2] for c in row), max(c[3] for c in row))
+        if _overlap_ratio(bbox, region.bbox) < 0.8:
+            continue
+        texts: list[str] = []
+        styles: dict = {}
+        images: list[tuple] = []
+        for col, card in enumerate(row):
+            lines = [line for line in _cluster_baselines(_atoms_in(atoms, card)) if any(a.text.strip() for a in line)]
+            # Words printed on the icon (a short label at the top, set off
+            # by a wide gap) belong to the picture, not to the text.
+            cut = card[1]
+            if lines:
+                bounds = [(min(a.y0 for a in line), max(a.y1 for a in line), sum(len(a.text.strip()) for a in line)) for line in lines]
+                body = 0
+                for k in range(len(bounds) - 1):
+                    gap = bounds[k + 1][0] - bounds[k][1]
+                    pitch = max(4.0, bounds[k][1] - bounds[k][0])
+                    if bounds[k][2] <= 4 and gap > pitch and bounds[k][1] < card[1] + (card[3] - card[1]) * 0.6:
+                        body = k + 1
+                cut = bounds[body][0] - 2.0
+            text_box = (card[0], cut, card[2], card[3])
+            text, runs = _cell_runs(atoms, text_box)
+            texts.append(text)
+            styles[(0, col)] = runs
+            if cut - card[1] >= 14:
+                try:
+                    # Inside the card's frame: the frame itself is not drawn again.
+                    clip = fitz.Rect(card[0] + 8, card[1] + 8, card[2] - 8, cut)
+                    png = page.get_pixmap(clip=clip, dpi=150, alpha=False).tobytes("png")
+                    images.append((0, col, png, clip.width, clip.height))
+                except Exception:
+                    pass
+        widths = [c[2] - c[0] for c in row]
+        spread = ((bbox[2] - bbox[0]) - sum(widths)) / len(widths)
+        widths = [w + spread for w in widths]
+        return RebuiltTable(
+            kind="vector",
+            bbox=bbox,
+            rows=[texts],
+            fills=[[""] * len(row)],
+            widths=widths,
+            heights=[bbox[3] - bbox[1]],
+            confidences=[[100.0] * len(row)],
+            rules=False,
+            rtl=_page_rtl(page),
+            notes=[f"card table: {region.reason}"],
+            images=images,
+            styles=styles,
+            centered=True,
+        )
+    return None
+
+
+def _rebuild_rules(page: fitz.Page, region: ImageRegion) -> RebuiltTable | None:
+    """A table read cell by cell from the grid its drawn borders make."""
+    try:
+        from core.docx_converter import _atoms_on_page, _cell_alignment, _cell_runs, _drawing_paints, _paint_at, _separate_overlapping_atoms
+        from core.faithful import _dedupe_fake_bold
+
+        atoms = _separate_overlapping_atoms(_dedupe_fake_bold(_atoms_on_page(page, upright_only=True)))
+    except Exception:
+        return None
+    for columns, rows_y, cells in rule_grids(page):
+        bbox = (columns[0], rows_y[0], columns[-1], rows_y[-1])
+        if _overlap_ratio(bbox, region.bbox) < 0.8:
+            continue
+        cells = [split_open_spans(row, columns, rows_y[r], rows_y[r + 1], atoms) for r, row in enumerate(cells)]
+        paints = _drawing_paints(page)
+        count = len(columns) - 1
+        rows: list[list[str]] = []
+        fills: list[list[str]] = []
+        styles: dict = {}
+        aligns: dict = {}
+        for r, row_cells in enumerate(cells):
+            texts = [""] * count
+            colours = [""] * count
+            for first, last in row_cells:
+                box = (columns[first], rows_y[r], columns[last + 1], rows_y[r + 1])
+                texts[first], styles[(r, first)] = _cell_runs(atoms, box)
+                aligns[(r, first)] = _cell_alignment(atoms, box)
+                # Sampled near the top: Word shades each text line again
+                # inside the cell, in the cell's own colour.
+                colour = _paint_at(paints, (box[0] + box[2]) / 2.0, box[1] + min(2.5, (box[3] - box[1]) / 2.0)) if paints else ""
+                for k in range(first, last + 1):
+                    colours[k] = colour
+            rows.append(texts)
+            fills.append(colours)
+        table = RebuiltTable(
+            kind="vector",
+            bbox=bbox,
+            rows=rows,
+            fills=fills,
+            widths=[columns[k + 1] - columns[k] for k in range(count)],
+            heights=[rows_y[k + 1] - rows_y[k] for k in range(len(rows_y) - 1)],
+            confidences=[[100.0] * count for _ in rows],
+            rules=True,
+            rtl=_page_rtl(page),
+            notes=[f"ruled table: {region.reason}"],
+            spans=[list(row) for row in cells],
+            images=cell_pictures(page, columns, rows_y, cells),
+            styles=styles,
+            aligns=aligns,
+        )
+        return table
+    return None
 
 
 def _filled_boxes(page: fitz.Page) -> list[tuple[fitz.Rect, tuple]]:
@@ -826,7 +1101,7 @@ def _pixels_look_like_table(png: bytes) -> tuple[bool, str]:
 
 def _rebuild_vector(page: fitz.Page, region: ImageRegion) -> RebuiltTable | None:
     try:
-        found = page.find_tables(vertical_strategy="lines", horizontal_strategy="lines")
+        found = _safe_find_tables(page, vertical_strategy="lines", horizontal_strategy="lines")
         tables = list(getattr(found, "tables", None) or [])
     except Exception:
         tables = []
@@ -1001,8 +1276,13 @@ def visible_drawings(page: fitz.Page) -> list[dict]:
     return shown
 
 
-def _ruling_lines(page: fitz.Page) -> tuple[list[tuple[float, float, float]], list[tuple[float, float, float]]]:
-    """Vertical rules as (x, y0, y1) and horizontal rules as (y, x0, x1)."""
+def _ruling_lines(page: fitz.Page, inked: bool = False) -> tuple[list[tuple[float, float, float]], list[tuple[float, float, float]]]:
+    """
+    Vertical rules as (x, y0, y1) and horizontal rules as (y, x0, x1).
+
+    With ``inked``, white lines are left out: on a coloured table they are
+    the paper showing between cells, not borders.
+    """
     verticals: list[tuple[float, float, float]] = []
     horizontals: list[tuple[float, float, float]] = []
     try:
@@ -1010,6 +1290,10 @@ def _ruling_lines(page: fitz.Page) -> tuple[list[tuple[float, float, float]], li
     except Exception:
         return verticals, horizontals
     for drawing in drawings:
+        if inked:
+            paint = drawing.get("fill") if drawing.get("type") == "f" else (drawing.get("color") or drawing.get("fill"))
+            if not paint or all(float(channel) >= 0.94 for channel in paint[:3]):
+                continue
         for item in drawing.get("items") or []:
             if not item:
                 continue
@@ -1026,6 +1310,111 @@ def _ruling_lines(page: fitz.Page) -> tuple[list[tuple[float, float, float]], li
                 elif r.height <= 2.0 and r.width > 4:
                     horizontals.append(((r.y0 + r.y1) / 2, r.x0, r.x1))
     return verticals, horizontals
+
+
+def _merge_segments(segments: list[tuple[float, float, float]], tolerance: float = 1.5, gap: float = 3.0) -> list[tuple[float, float, float]]:
+    """Join rule pieces on one line: (position, start, end) sorted and merged."""
+    merged: list[list[float]] = []
+    for pos, start, end in sorted(segments, key=lambda s: (round(s[0] / tolerance), s[1])):
+        for line in merged:
+            if abs(line[0] - pos) <= tolerance and start <= line[2] + gap and end >= line[1] - gap:
+                line[1] = min(line[1], start)
+                line[2] = max(line[2], end)
+                break
+        else:
+            merged.append([pos, start, end])
+    return [tuple(line) for line in merged]
+
+
+def rule_grids(page: fitz.Page) -> list[tuple[list[float], list[float], list[list[tuple[int, int]]]]]:
+    """
+    Tables whose drawn borders close every row: (column edges, row edges, cells).
+
+    Word draws a table's borders as thin bars, and its cell shading and
+    paragraph shading as boxes inside them. A line finder takes every box
+    edge for a rule and splits one row into many. The thin bars alone say
+    where the rows and columns are. A row counts when bars close it on the
+    left and the right; a table is two such rows or more, one under the other.
+    Each row lists its cells as (first column, last column), so a cell that
+    no bar divides spans its columns.
+    """
+    verticals, horizontals = _ruling_lines(page, inked=True)
+    hs = [h for h in _merge_segments(horizontals) if h[2] - h[1] >= 60]
+    vs = _merge_segments(verticals)
+    hs.sort(key=lambda h: h[0])
+    lines: list[tuple[float, float, float]] = []
+    for h in hs:
+        if lines and abs(h[0] - lines[-1][0]) <= 2.0 and abs(h[1] - lines[-1][1]) <= 6 and abs(h[2] - lines[-1][2]) <= 6:
+            continue
+        lines.append(h)
+
+    def edges_in(top: float, bottom: float, left: float, right: float) -> list[float]:
+        need = (bottom - top) * 0.8
+        xs = sorted(
+            x for x, y0, y1 in vs
+            if left - 6 <= x <= right + 6 and min(y1, bottom) - max(y0, top) >= need
+        )
+        out: list[float] = []
+        for x in xs:
+            if not out or x - out[-1] > 5.0:
+                out.append(x)
+        return out
+
+    grids = []
+    used: set[int] = set()
+    for i in range(len(lines)):
+        if i in used:
+            continue
+        run = [lines[i]]
+        bands: list[list[float]] = []
+        for j in range(i + 1, len(lines)):
+            top, nxt = run[-1], lines[j]
+            if abs(nxt[1] - top[1]) > 6 or abs(nxt[2] - top[2]) > 6:
+                # A shorter rule inside a cell.
+                continue
+            if nxt[0] - top[0] < 6:
+                # A doubled border: the same rule again.
+                used.add(j)
+                continue
+            edges = edges_in(top[0], nxt[0], top[1], top[2])
+            if len(edges) < 2 or abs(edges[0] - top[1]) > 6 or abs(edges[-1] - top[2]) > 6:
+                break
+            run.append(nxt)
+            bands.append(edges)
+            used.add(j)
+        if len(bands) < 2:
+            continue
+        columns: list[float] = []
+        for x in sorted(x for edges in bands for x in edges):
+            if not columns or x - columns[-1] > 5.0:
+                columns.append(x)
+        if len(columns) < 3:
+            continue
+        # A border that closes some columns but not all is a cell merged
+        # down several rows; this reader keeps one row per full border, so
+        # such a table is left to the other readers.
+        merged_down = False
+        for line in lines:
+            if line in run or not (run[0][0] + 3 < line[0] < run[-1][0] - 3):
+                continue
+            if abs(line[1] - run[0][1]) <= 6 and abs(line[2] - run[0][2]) <= 6:
+                continue
+            for k in range(len(columns) - 1):
+                span = columns[k + 1] - columns[k]
+                if min(line[2], columns[k + 1]) - max(line[1], columns[k]) >= span * 0.9:
+                    merged_down = True
+                    break
+            if merged_down:
+                break
+        if merged_down:
+            continue
+        rows_y = [line[0] for line in run]
+        cells = []
+        for edges in bands:
+            index = [min(range(len(columns)), key=lambda k: abs(columns[k] - x)) for x in edges]
+            cells.append([(index[k], index[k + 1] - 1) for k in range(len(index) - 1) if index[k + 1] > index[k]])
+        grids.append((columns, rows_y, cells))
+    return grids
 
 
 def _snap_to_rules(page: fitz.Page, bbox: tuple, widths: list[float], heights: list[float]) -> tuple[tuple, list[float], list[float]]:

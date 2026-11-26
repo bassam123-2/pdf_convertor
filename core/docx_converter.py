@@ -24,6 +24,8 @@ A password-protected file:
 
 from __future__ import annotations
 
+from core.safe_tables import find_tables as _safe_find_tables
+
 import argparse
 import contextvars
 import copy
@@ -201,6 +203,15 @@ class TableBlock:
     widths: list[float] = field(default_factory=list)
     rules: bool = True
     fit_scale: float = 1.0
+    # Cells that one cell covers, per row: (first column, last column).
+    spans: list[list[tuple[int, int]]] = field(default_factory=list)
+    # Pictures inside cells: (row, column, image bytes, width pt, height pt).
+    images: list[tuple] = field(default_factory=list)
+    # Styled runs per cell, {(row, column): [(text, bold, italic, colour)]}; "\n" breaks the line.
+    styles: dict = field(default_factory=dict)
+    centered: bool = False
+    # How the printed cell sets its text, {(row, column): (horizontal, vertical)}.
+    aligns: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -457,14 +468,36 @@ def _repair_ligatures(page: fitz.Page, atoms: list[_Atom]) -> None:
 
 def _cluster_baselines(atoms: list[_Atom]) -> list[list[_Atom]]:
     """Stack glyphs that share a baseline. A 16-point gap is the next line."""
+    import unicodedata
+
+    def is_mark(atom) -> bool:
+        text = atom.text or ""
+        return bool(text) and all(unicodedata.category(ch) == "Mn" for ch in text)
+
+    # A raised mark (shadda, a tanween) can sit on its own baseline. Lines are
+    # built from the letters, against the line's first letter; marks then
+    # join the nearest line.
     ordered = sorted(atoms, key=lambda atom: (atom.origin_y, atom.origin_x))
+    letters = [atom for atom in ordered if not is_mark(atom)]
+    marks = [atom for atom in ordered if is_mark(atom)]
+    if not letters:
+        letters, marks = ordered, []
     lines: list[list[_Atom]] = []
-    for atom in ordered:
+    for atom in letters:
         limit = max(2.4, atom.size * 0.28)
         if lines and abs(atom.origin_y - lines[-1][0].origin_y) <= limit:
             lines[-1].append(atom)
         else:
             lines.append([atom])
+    for atom in marks:
+        limit = max(2.4, atom.size * 0.28) * 2.0
+        best = min(lines, key=lambda line: abs(atom.origin_y - line[0].origin_y))
+        if abs(atom.origin_y - best[0].origin_y) <= limit:
+            best.append(atom)
+        else:
+            lines.append([atom])
+    if marks:
+        lines.sort(key=lambda line: line[0].origin_y)
     return lines
 
 
@@ -745,7 +778,7 @@ def _tables_from_pymupdf(page: fitz.Page, chars: list[_Atom]) -> list[TableBlock
     so a wrapped line stays in its own column.
     """
     try:
-        found = page.find_tables(vertical_strategy="lines", horizontal_strategy="lines")
+        found = _safe_find_tables(page, vertical_strategy="lines", horizontal_strategy="lines")
         tables = list(getattr(found, "tables", None) or found)
     except Exception:
         return []
@@ -774,6 +807,179 @@ def _tables_from_pymupdf(page: fitz.Page, chars: list[_Atom]) -> list[TableBlock
         if finished:
             rows, fills = finished
             blocks.append(TableBlock(group["bbox"], rows, fills))
+    return blocks
+
+
+def _cell_paragraphs(atoms: list[_Atom], box: tuple[float, float, float, float]) -> str:
+    """A cell's text, with a line break where the printed cell starts a new paragraph."""
+    return _cell_runs(atoms, box)[0]
+
+
+def _style_of(atoms: list[_Atom]) -> tuple[bool, bool, str]:
+    """The weight, slant and colour most of these letters are printed in."""
+    letters = [atom for atom in atoms if atom.text.strip()] or atoms
+    if not letters:
+        return False, False, ""
+    bold = sum(1 for atom in letters if atom.bold) * 2 > len(letters)
+    italic = sum(1 for atom in letters if getattr(atom, "italic", False)) * 2 > len(letters)
+    colours: dict[str, int] = {}
+    for atom in letters:
+        colours[atom.color or ""] = colours.get(atom.color or "", 0) + 1
+    return bold, italic, max(colours, key=colours.get)
+
+
+def _line_runs(line: list[_Atom], text: str) -> list[tuple[str, bool, bool, str]]:
+    """
+    One printed line as runs of one weight, slant and colour.
+
+    A left-to-right line is cut into words at the gaps between letters, so a
+    bold name followed by plain text keeps both. A line with Arabic keeps
+    one style, the one most of its letters use: its letters are reordered
+    and cannot be matched to words one by one.
+    """
+    if _arabic_count(text):
+        bold, italic, colour = _style_of(line)
+        return [(text, bold, italic, colour)]
+    ordered = sorted(line, key=lambda atom: atom.x0)
+    words: list[list[_Atom]] = []
+    for atom in ordered:
+        if not atom.text.strip():
+            if words and words[-1]:
+                words.append([])
+            continue
+        gap = atom.x0 - words[-1][-1].x1 if words and words[-1] else 0.0
+        if words and words[-1] and gap > max(1.0, atom.size * 0.2):
+            words.append([])
+        if not words:
+            words.append([])
+        words[-1].append(atom)
+    words = [word for word in words if word]
+    joined = " ".join("".join(atom.text for atom in word) for word in words)
+    if re.sub(r"\s+", "", joined) != re.sub(r"\s+", "", text):
+        bold, italic, colour = _style_of(line)
+        return [(text, bold, italic, colour)]
+    runs: list[list] = []
+    for word in words:
+        piece = "".join(atom.text for atom in word)
+        style = _style_of(word)
+        if runs and tuple(runs[-1][1:]) == style:
+            runs[-1][0] += " " + piece
+        else:
+            if runs:
+                runs[-1][0] += " "
+            runs.append([piece, *style])
+    return [tuple(run) for run in runs]
+
+
+def _cell_runs(atoms: list[_Atom], box: tuple[float, float, float, float]) -> tuple[str, list[tuple[str, bool, bool, str]]]:
+    """
+    A cell's text and its styled runs; a run of "\n" is a line break.
+
+    Lines that wrap are joined. A new paragraph begins after a line that
+    stops well short of the cell's right side, after a wide gap, or at a
+    line that starts with a bullet or a dash.
+    """
+    lines = _cluster_baselines(_atoms_in(atoms, box))
+    width = max(1.0, box[2] - box[0])
+    parts: list[str] = []
+    runs: list[tuple[str, bool, bool, str]] = []
+    previous = None
+    for line in lines:
+        text = plain_arabic(_logical_text(line)).strip()
+        if not text:
+            continue
+        left = min(atom.x0 for atom in line)
+        right = max(atom.x1 for atom in line)
+        top = min(atom.y0 for atom in line)
+        bottom = max(atom.y1 for atom in line)
+        if previous is not None:
+            p_left, p_right, p_top, p_bottom = previous
+            pitch = max(1.0, p_bottom - p_top)
+            rtl = _arabic_count(text) > len(re.findall(r"[A-Za-z]", text))
+            short = (p_left - box[0] > width * 0.25) if rtl else (box[2] - p_right > width * 0.25)
+            # A bold title over plain text is two paragraphs, however long.
+            restyled = _style_of(line)[:2] != previous_style[:2]
+            new = short or restyled or top - p_bottom > pitch * 0.9 or re.match(r"[-–•▪●·◦]\s", text)
+            parts.append("\n" if new else " ")
+            runs.append(("\n", False, False, "") if new else (" ", False, False, ""))
+        parts.append(text)
+        runs.extend(_line_runs(line, text))
+        previous = (left, right, top, bottom)
+        previous_style = _style_of(line)
+    return "".join(parts).strip(), runs
+
+
+def _cell_alignment(atoms: list[_Atom], box: tuple[float, float, float, float]) -> tuple[str, str]:
+    """
+    Where a printed cell sets its text: ("center" or "", "center" or "top").
+
+    Lines whose left and right gaps match are centred; a block whose space
+    above and below match sits in the middle of the cell.
+    """
+    lines = [line for line in _cluster_baselines(_atoms_in(atoms, box)) if any(a.text.strip() for a in line)]
+    if not lines:
+        return "", "center"
+    width = max(1.0, box[2] - box[0])
+    height = max(1.0, box[3] - box[1])
+    centred = 0
+    for line in lines:
+        letters = [a for a in line if a.text.strip()]
+        left = min(a.x0 for a in letters) - box[0]
+        right = box[2] - max(a.x1 for a in letters)
+        if left > 6 and right > 6 and abs(left - right) <= max(6.0, width * 0.08):
+            centred += 1
+    top = min(a.y0 for line in lines for a in line) - box[1]
+    bottom = box[3] - max(a.y1 for line in lines for a in line)
+    horizontal = "center" if centred * 2 > len(lines) and (len(lines) > 1 or centred) else ""
+    vertical = "center" if abs(top - bottom) <= max(6.0, height * 0.2) else "top"
+    return horizontal, vertical
+
+
+def _rule_tables(page: fitz.Page, atoms: list[_Atom]) -> list[TableBlock]:
+    """Tables whose thin drawn borders close every row (see table_rebuild.rule_grids)."""
+    try:
+        from core.table_rebuild import rule_grids
+
+        grids = rule_grids(page)
+    except Exception:
+        return []
+    paints = _drawing_paints(page)
+    blocks: list[TableBlock] = []
+    from core.table_rebuild import cell_pictures, split_open_spans
+
+    for columns, rows_y, cells in grids:
+        cells = [split_open_spans(row, columns, rows_y[r], rows_y[r + 1], atoms) for r, row in enumerate(cells)]
+        count = len(columns) - 1
+        rows: list[list[str]] = []
+        fills: list[list[str]] = []
+        styles: dict = {}
+        aligns: dict = {}
+        for r, row_cells in enumerate(cells):
+            texts = [""] * count
+            colours = [""] * count
+            for first, last in row_cells:
+                box = (columns[first], rows_y[r], columns[last + 1], rows_y[r + 1])
+                texts[first], styles[(r, first)] = _cell_runs(atoms, box)
+                aligns[(r, first)] = _cell_alignment(atoms, box)
+                colour = _paint_at(paints, (box[0] + box[2]) / 2.0, box[1] + min(2.5, (box[3] - box[1]) / 2.0)) if paints else ""
+                for k in range(first, last + 1):
+                    colours[k] = colour
+            rows.append(texts)
+            fills.append(colours)
+        if sum(1 for row in rows for cell in row if cell) < 3:
+            continue
+        bbox = (columns[0], rows_y[0], columns[-1], rows_y[-1])
+        blocks.append(TableBlock(
+            bbox,
+            rows,
+            fills,
+            widths=[columns[k + 1] - columns[k] for k in range(count)],
+            rules=True,
+            spans=[list(row) for row in cells],
+            images=cell_pictures(page, columns, rows_y, cells),
+            styles=styles,
+            aligns=aligns,
+        ))
     return blocks
 
 
@@ -3131,10 +3337,16 @@ def extract_page(
             atoms,
         )
     else:
+        ruled = _rule_tables(page, atoms) if reading == "digital" else []
         tables = _tables_from_pymupdf(page, atoms)
         if not tables:
             tables = _tables_from_pdfplumber(plumber_page, atoms)
         tables = _dedupe_tables(page, tables)
+        if ruled:
+            # Borders that close every row say where the cells are; a line
+            # finder over the same area also takes each shading box's edge
+            # for a rule and splits the rows.
+            tables = [table for table in tables if not _covers_any(table.bbox, ruled)]
         if mode == "grid":
             # A ruled page keeps its cells even when the grid is dense.
             # A margin stamp and a grid with no words are still dropped.
@@ -3157,8 +3369,11 @@ def extract_page(
         )
         figures = _release_text_panels(figures, atoms)
         tables = _without_figure_tables(tables, figures)
+        if ruled:
+            figures = [figure for figure in figures if not any(_overlap_ratio(figure.bbox, table.bbox) > 0.5 for table in ruled)]
+            tables = ruled + tables
         if reading == "digital":
-            coloured = _coloured_tables(page, [])
+            coloured = [c for c in _coloured_tables(page, []) if not _covers_any(c.bbox, ruled)]
             if coloured:
                 # Over the same area the coloured-cell reading wins: a line
                 # finder takes its white gaps for a grid and splits its rows.
@@ -3208,6 +3423,10 @@ def _picture_tables(page: fitz.Page, found: list) -> list:
             continue
         extra.append(TableBlock(bbox=table.bbox, rows=table.rows, widths=table.widths, rules=True))
     return extra
+
+
+def _covers_any(box, tables: list) -> bool:
+    return any(_overlap_ratio(box, t.bbox) > 0.3 or _overlap_ratio(t.bbox, box) > 0.3 for t in tables)
 
 
 def _coloured_tables(page: fitz.Page, found: list) -> list:
@@ -3797,9 +4016,38 @@ def _image_bytes(page: fitz.Page, xref: int) -> bytes | None:
         except Exception:
             pass
     try:
-        return document.extract_image(xref).get("image")
+        data = document.extract_image(xref).get("image")
     except Exception:
         return None
+    return _word_readable(data, document, xref)
+
+
+def _word_readable(data: bytes | None, document=None, xref: int = 0) -> bytes | None:
+    """
+    Picture bytes Word's writer can size.
+
+    A JPEG that says it has 0 dots per inch, a CMYK JPEG or a format Word
+    does not take (JPX, JBIG2) stops python-docx. Such a picture is drawn
+    again as PNG.
+    """
+    if not data:
+        return data
+    try:
+        from docx.image.image import Image as _DocxImage
+
+        probe = _DocxImage.from_blob(data)
+        probe.width, probe.height  # noqa: B018
+        if probe.horz_dpi and probe.vert_dpi:
+            return data
+    except Exception:
+        pass
+    try:
+        pixmap = fitz.Pixmap(document, xref) if document is not None and xref else fitz.Pixmap(data)
+        if pixmap.colorspace is not None and pixmap.colorspace.n not in (1, 3):
+            pixmap = fitz.Pixmap(fitz.csRGB, pixmap)
+        return pixmap.tobytes("png")
+    except Exception:
+        return data
 
 
 def text_direction(text: str) -> str:
@@ -4160,7 +4408,7 @@ def _shade_header(cell) -> None:
     properties.append(shading)
 
 
-def _set_cell_width(cell, width_dxa: int) -> None:
+def _set_cell_width(cell, width_dxa: int, valign: str = "center") -> None:
     properties = cell._tc.get_or_add_tcPr()
     width = OxmlElement("w:tcW")
     width.set(qn("w:w"), str(width_dxa))
@@ -4170,7 +4418,7 @@ def _set_cell_width(cell, width_dxa: int) -> None:
         properties.remove(existing)
     properties.append(width)
     align = OxmlElement("w:vAlign")
-    align.set(qn("w:val"), "center")
+    align.set(qn("w:val"), valign)
     existing_align = properties.find(qn("w:vAlign"))
     if existing_align is not None:
         properties.remove(existing_align)
@@ -4317,6 +4565,18 @@ def _add_table(
         properties.remove(existing_layout)
     properties.append(layout)
 
+    # Printed order, left to right, said outright: in a right-to-left
+    # section some readers mirror a table that does not say.
+    visual = OxmlElement("w:bidiVisual")
+    visual.set(qn("w:val"), "0")
+    properties.insert(0, visual)
+    try:
+        from core.faithful import _order_tbl_pr
+
+        _order_tbl_pr(properties)
+    except Exception:
+        pass
+
     grid = table._tbl.find(qn("w:tblGrid"))
     if grid is not None:
         for node, dxa in zip(grid.findall(qn("w:gridCol")), column_dxa):
@@ -4327,14 +4587,17 @@ def _add_table(
     first = [(_clean_flow_text(cell) or "") for cell in rows[0]] if rows else []
     header_row = bool(first) and max((len(cell) for cell in first), default=0) <= 60
     for row_index, row in enumerate(rows):
+        # A row of long or several-line cells reads from the top, as printed.
+        tall = any(len(text or "") > 90 or (text or "").count("\n") >= 2 for text in row)
         for col_index, text in enumerate(row):
             cell = table.cell(row_index, col_index)
-            _set_cell_width(cell, column_dxa[col_index])
+            horizontal, vertical = (block.aligns or {}).get((row_index, col_index), ("", "top" if tall else "center"))
+            _set_cell_width(cell, column_dxa[col_index], vertical)
             paragraph = cell.paragraphs[0]
             paragraph.style = document.styles["Normal"]
             # Each cell runs in the direction of its own letters: an English
             # cell starts at the left even in an Arabic document.
-            latin_cell = len(re.findall(r"[A-Za-z]", text or "")) > _arabic_count(text or "")
+            latin_cell = len(re.findall(r"[A-Za-z]", text or "")) > _arabic_count(text or "") or not _arabic_count(text or "")
             if text and latin_cell and _DIRECTION.get() != "rtl" or text and len(re.findall(r"[A-Za-z]", text)) > max(3, _arabic_count(text) * 3):
                 _set_paragraph_ltr(paragraph)
             else:
@@ -4342,16 +4605,41 @@ def _add_table(
             paragraph.paragraph_format.space_before = Pt(0)
             paragraph.paragraph_format.space_after = Pt(0)
             paragraph.paragraph_format.line_spacing = 1.0
-            text = _clean_flow_text(text)
-            run = paragraph.add_run(text) if text else None
+            if block.centered or horizontal == "center":
+                paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            # A cell's own paragraphs stay apart (a title, a name, "Venue:").
+            parts = [_clean_flow_text(part) for part in (text or "").split("\n")]
+            parts = [part for part in parts if part]
+            text = " ".join(parts)
             font_size = max(7.5, 11.0 * block.fit_scale)
             if getattr(block, "text_font", ""):
                 from core.flow_layout import _width_factor
 
                 font_size *= _width_factor(text or "", block.text_font)
-            if run is not None:
-                _set_run_font(run, font_size, row_index == 0 and header_row and block.rules and not block.fills)
-            if text and re.fullmatch(r"[\d٠-٩]{1,4}", text):
+            run = None
+            runs = []
+            styled = (block.styles or {}).get((row_index, col_index))
+            plain_bold = row_index == 0 and header_row and block.rules and not block.fills
+            if styled:
+                for piece, bold, italic, colour in styled:
+                    if piece == "\n":
+                        paragraph.add_run().add_break()
+                        continue
+                    run = paragraph.add_run(piece)
+                    runs.append(run)
+                    _set_run_font(run, font_size, bool(bold), piece)
+                    if italic:
+                        run.italic = True
+                    if colour and re.fullmatch(r"#?[0-9A-Fa-f]{6}", colour) and colour.lstrip("#").upper() not in {"000000"}:
+                        run.font.color.rgb = RGBColor.from_string(colour.lstrip("#").upper())
+            else:
+                for part_index, part in enumerate(parts):
+                    if part_index:
+                        paragraph.add_run().add_break()
+                    run = paragraph.add_run(part)
+                    runs.append(run)
+                    _set_run_font(run, font_size, plain_bold)
+            if text and re.fullmatch(r"[\d٠-٩]{1,4}", text) and horizontal != "center" and not block.centered:
                 # A page number stays on the right edge of its cell.
                 paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
                 justification = paragraph._p.get_or_add_pPr().find(qn("w:jc"))
@@ -4364,13 +4652,72 @@ def _add_table(
             if fill:
                 _shade_box(cell._tc.get_or_add_tcPr(), fill)
                 ink = _ink_on(fill)
-                if ink is not None and run is not None:
-                    run.font.color.rgb = ink
+                if ink is not None:
+                    for each in runs:
+                        each.font.color.rgb = ink
             elif row_index == 0 and header_row and block.rules and not colored:
                 _shade_header(cell)
         _lock_row(table.rows[row_index])
+    if block.centered and not block.rules:
+        # Cards: each cell framed on its own, in a light dashed line.
+        for row in table.rows:
+            for cell in row.cells:
+                properties = cell._tc.get_or_add_tcPr()
+                borders = OxmlElement("w:tcBorders")
+                for side in ("top", "left", "bottom", "right"):
+                    edge = OxmlElement(f"w:{side}")
+                    edge.set(qn("w:val"), "dashed")
+                    edge.set(qn("w:sz"), "8")
+                    edge.set(qn("w:space"), "0")
+                    edge.set(qn("w:color"), "A6A6A6")
+                    borders.append(edge)
+                old_borders = properties.find(qn("w:tcBorders"))
+                if old_borders is not None:
+                    properties.remove(old_borders)
+                width_node = properties.find(qn("w:tcW"))
+                if width_node is not None:
+                    width_node.addnext(borders)
+                else:
+                    properties.insert(0, borders)
+    for row_index, column, data, width_pt, height_pt in block.images or []:
+        if row_index < len(rows) and column < columns:
+            _cell_picture(table.cell(row_index, column), data, width_pt, column_dxa[column] / 20.0)
+    for row_index, row_spans in enumerate(block.spans or []):
+        if row_index >= len(rows):
+            break
+        for first, last in row_spans:
+            if last > first and last < columns:
+                try:
+                    table.cell(row_index, first).merge(table.cell(row_index, last))
+                except Exception:
+                    pass
     _pad_table_cells(table, 100 if defined else 80, 60 if defined else 40)
     _fit_table_height(table, _row_heights(block, content_width_emu / 12700.0, max_height_pt))
+    grows = {entry[0] for entry in block.images or []}
+    if block.spans:
+        # A table read from its drawn borders: rows keep at least their
+        # printed room and grow when the Word font needs more.
+        grows = set(range(len(table.rows)))
+    for row_index in grows:
+        # A row with a picture grows to hold it.
+        if row_index < len(table.rows):
+            height = table.rows[row_index]._tr.get_or_add_trPr().find(qn("w:trHeight"))
+            if height is not None:
+                height.set(qn("w:hRule"), "atLeast")
+
+
+def _cell_picture(cell, data: bytes, width_pt: float, room_pt: float) -> None:
+    """Put a picture at the top of a cell, at its printed size or the cell's width."""
+    from io import BytesIO as _BytesIO
+
+    width = max(12.0, min(width_pt, room_pt - 8.0))
+    try:
+        paragraph = cell.paragraphs[0]
+        holder = paragraph.insert_paragraph_before() if paragraph.text.strip() else paragraph
+        holder.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        holder.add_run().add_picture(_BytesIO(data), width=Pt(width))
+    except Exception:
+        pass
 
 
 def _lock_row(row) -> None:
@@ -4403,7 +4750,7 @@ def _row_heights(block: TableBlock, width_pt: float, max_height_pt: float | None
         lines = 1
         for index, cell in enumerate(row):
             column_width = widths[index] if index < len(widths) else width_pt / columns
-            lines = max(lines, _line_count(cell, column_width * 0.92, font))
+            lines = max(lines, sum(_line_count(part, column_width * 0.92, font) for part in (cell or "").split("\n")))
         heights.append(lines * font * 1.25 + 2.0)
     total = sum(heights)
     if max_height_pt and total > max_height_pt > 0:
@@ -4905,6 +5252,56 @@ def _printed_number(text: str) -> int | None:
         return None
 
 
+def _page_number_atoms(atoms: list[_Atom]) -> list[_Atom]:
+    """
+    The glyphs of the printed page number in a footer line, if it has one.
+
+    A run of digits is the page number when it stands apart from the words
+    (a wide gap), when it is the whole line, or when a page-word stands next
+    to it. Digits inside the running text ("30 November 2026") are text.
+    """
+    def is_digit(atom) -> bool:
+        return re.fullmatch(r"[\d٠-٩]{1,4}", plain_arabic(atom.text).strip() or " ") is not None
+
+    visible = sorted((atom for atom in atoms if atom.text.strip()), key=lambda atom: atom.x0)
+    if not visible:
+        return []
+    runs: list[list[_Atom]] = []
+    for atom in visible:
+        if not is_digit(atom):
+            continue
+        size = max(4.0, atom.y1 - atom.y0)
+        if runs and atom.x0 - runs[-1][-1].x1 <= size * 0.35 and abs(atom.y0 - runs[-1][-1].y0) <= size * 0.5:
+            runs[-1].append(atom)
+        else:
+            runs.append([atom])
+    picked: list[_Atom] = []
+    for run in runs:
+        ids = {id(atom) for atom in run}
+        others = [atom for atom in visible if id(atom) not in ids and abs(atom.y0 - run[0].y0) <= max(4.0, run[0].y1 - run[0].y0)]
+        if not others:
+            picked.extend(run)
+            continue
+        size = max(4.0, run[0].y1 - run[0].y0)
+        left = run[0].x0
+        right = run[-1].x1
+        gap = min(
+            min((left - atom.x1 for atom in others if atom.x1 <= left + 0.5), default=1e9),
+            min((atom.x0 - right for atom in others if atom.x0 >= right - 0.5), default=1e9),
+        )
+        if gap > size * 1.5:
+            picked.extend(run)
+            continue
+        line = _line_from_atoms([
+            atom for atom in atoms
+            if id(atom) not in ids and abs(atom.y0 - run[0].y0) <= max(4.0, run[0].y1 - run[0].y0)
+        ])
+        rest = plain_arabic(line.text).strip() if line is not None else ""
+        if re.search(r"((?:ال)?صفح[ةه]|page)\s*[|:\-–]?\s*$|^\s*((?:ال)?صفح[ةه]|page)(?:\s|$)", rest, flags=re.IGNORECASE):
+            picked.extend(run)
+    return picked
+
+
 def _read_footer(page: fitz.Page) -> tuple[str, str, int | None, float]:
     """
     The running title, a page-word such as "page", the printed number, and the gap.
@@ -4921,11 +5318,7 @@ def _read_footer(page: fitz.Page) -> tuple[str, str, int | None, float]:
     ]
     if not any(atom.text.strip() for atom in atoms):
         return "", "", None, 18.0
-    number_atoms = [
-        atom
-        for atom in atoms
-        if re.fullmatch(r"[\d٠-٩]{1,4}", plain_arabic(atom.text).strip() or " ") is not None
-    ]
+    number_atoms = _page_number_atoms(atoms)
     numbered = {id(atom) for atom in number_atoms}
     title_atoms = [atom for atom in atoms if id(atom) not in numbered]
     line = _line_from_atoms(title_atoms) if any(atom.text.strip() for atom in title_atoms) else None
@@ -4935,7 +5328,6 @@ def _read_footer(page: fitz.Page) -> tuple[str, str, int | None, float]:
     if found:
         label = found.group(1)
         title = title[: found.start()].strip()
-    title = re.sub(r"(?:^|\s)[\d٠-٩]{1,4}\s*$", "", title).strip()
     number_value = _printed_number("".join(atom.text for atom in number_atoms)) if number_atoms else None
     if line is None and not number_atoms:
         return "", "", None, 18.0

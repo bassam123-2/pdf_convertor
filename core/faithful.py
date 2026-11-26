@@ -2083,7 +2083,7 @@ def _write_floating_table(document, table, scale: float, off_x: float, off_y: fl
             parts = (text or "").split("\n") or [""]
             from core.docx_converter import _arabic_count, _set_paragraph_ltr, _set_paragraph_rtl, _set_run_font
 
-            arabic_cell = _arabic_count(text or "") >= len(re.findall(r"[A-Za-z]", text or ""))
+            arabic_cell = 0 < _arabic_count(text or "") >= len(re.findall(r"[A-Za-z]", text or ""))
             if text and arabic_cell:
                 _set_paragraph_rtl(paragraph, text)
             elif text:
@@ -2108,4 +2108,13 @@ def _write_floating_table(document, table, scale: float, off_x: float, off_y: fl
                         run.font.highlight_color = WD_COLOR_INDEX.YELLOW
                     except Exception:
                         pass
+    for ri, row_spans in enumerate(getattr(table, "spans", None) or []):
+        if ri >= len(rows):
+            break
+        for first, last in row_spans:
+            if last > first and last < cols:
+                try:
+                    word_table.cell(ri, first).merge(word_table.cell(ri, last))
+                except Exception:
+                    pass
     counts["tables"] = counts.get("tables", 0) + 1

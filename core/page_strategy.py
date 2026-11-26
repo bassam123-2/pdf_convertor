@@ -9,6 +9,8 @@ the choice per page through WordOptions.page_strategies.
 
 from __future__ import annotations
 
+from core.safe_tables import find_tables as _safe_find_tables
+
 from dataclasses import asdict, dataclass
 
 import fitz
@@ -74,7 +76,7 @@ def _looks_broken(page: fitz.Page) -> bool:
 
 def _ruled_table(page: fitz.Page) -> bool:
     try:
-        found = page.find_tables(vertical_strategy="lines", horizontal_strategy="lines")
+        found = _safe_find_tables(page, vertical_strategy="lines", horizontal_strategy="lines")
     except Exception:
         return False
     tables = list(getattr(found, "tables", None) or [])

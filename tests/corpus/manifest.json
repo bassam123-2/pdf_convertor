@@ -12,13 +12,20 @@
       "file": "files/hamza_resume_ppt.pdf",
       "producer": "PowerPoint",
       "language": "en",
-      "structure": ["slides", "columns"],
-      "graphics": ["vector shapes", "backgrounds", "header/footer"],
+      "structure": [
+        "slides",
+        "columns"
+      ],
+      "graphics": [
+        "vector shapes",
+        "backgrounds",
+        "header/footer"
+      ],
       "font_issues": [],
       "orientation": "landscape",
       "page_size": "960x540",
       "mode": "faithful",
-      "min_similarity": 0.60,
+      "min_similarity": 0.6,
       "notes": "English PowerPoint resume; sidebar columns; Georgia headings."
     },
     {
@@ -26,8 +33,14 @@
       "file": "files/arabic_research_15.pdf",
       "producer": "Word",
       "language": "ar",
-      "structure": ["flowing text", "columns", "tables"],
-      "graphics": ["images"],
+      "structure": [
+        "flowing text",
+        "columns",
+        "tables"
+      ],
+      "graphics": [
+        "images"
+      ],
       "font_issues": [],
       "orientation": "portrait",
       "mode": "editable",
@@ -39,8 +52,12 @@
       "file": "files/arabic_news_scan.pdf",
       "producer": "scanned",
       "language": "ar",
-      "structure": ["scanned"],
-      "graphics": ["images"],
+      "structure": [
+        "scanned"
+      ],
+      "graphics": [
+        "images"
+      ],
       "font_issues": [],
       "orientation": "portrait",
       "mode": "editable",
@@ -52,12 +69,14 @@
       "file": "files/vehicle_check_ar.pdf",
       "producer": "unknown",
       "language": "ar",
-      "structure": ["flowing text"],
+      "structure": [
+        "flowing text"
+      ],
       "graphics": [],
       "font_issues": [],
       "orientation": "portrait",
       "mode": "faithful",
-      "min_similarity": 0.40,
+      "min_similarity": 0.4,
       "notes": "Small Arabic sample kept in the project folder."
     },
     {
@@ -65,12 +84,16 @@
       "file": "files/vehicle_font_broken.pdf",
       "producer": "unknown",
       "language": "ar",
-      "structure": ["flowing text"],
+      "structure": [
+        "flowing text"
+      ],
       "graphics": [],
-      "font_issues": ["missing ToUnicode"],
+      "font_issues": [
+        "missing ToUnicode"
+      ],
       "orientation": "portrait",
       "mode": "faithful",
-      "min_similarity": 0.30,
+      "min_similarity": 0.3,
       "notes": "Font encoding issues; OCR of bad spans may apply."
     },
     {
@@ -78,8 +101,13 @@
       "file": "files/table_bordered.pdf",
       "producer": "synthetic",
       "language": "en",
-      "structure": ["tables"],
-      "graphics": ["vector rules", "header fill"],
+      "structure": [
+        "tables"
+      ],
+      "graphics": [
+        "vector rules",
+        "header fill"
+      ],
       "font_issues": [],
       "orientation": "portrait",
       "mode": "faithful",
@@ -92,12 +120,14 @@
       "file": "files/table_borderless.pdf",
       "producer": "synthetic",
       "language": "en",
-      "structure": ["tables"],
+      "structure": [
+        "tables"
+      ],
       "graphics": [],
       "font_issues": [],
       "orientation": "portrait",
       "mode": "faithful",
-      "min_similarity": 0.30,
+      "min_similarity": 0.3,
       "check_tables": true,
       "notes": "Borderless table via column alignment."
     },
@@ -106,12 +136,16 @@
       "file": "files/table_raster.pdf",
       "producer": "synthetic",
       "language": "en",
-      "structure": ["tables"],
-      "graphics": ["raster table"],
+      "structure": [
+        "tables"
+      ],
+      "graphics": [
+        "raster table"
+      ],
       "font_issues": [],
       "orientation": "portrait",
       "mode": "faithful",
-      "min_similarity": 0.30,
+      "min_similarity": 0.3,
       "check_tables": true,
       "notes": "Table is an embedded picture; OCR rebuild expected."
     },
@@ -120,12 +154,16 @@
       "file": "files/chart_with_labels.pdf",
       "producer": "synthetic",
       "language": "en",
-      "structure": ["figures"],
-      "graphics": ["chart"],
+      "structure": [
+        "figures"
+      ],
+      "graphics": [
+        "chart"
+      ],
       "font_issues": [],
       "orientation": "portrait",
       "mode": "faithful",
-      "min_similarity": 0.40,
+      "min_similarity": 0.4,
       "notes": "Chart labels live inside the picture; no stray OCR labels."
     },
     {
@@ -133,12 +171,17 @@
       "file": "files/table_multipage.pdf",
       "producer": "synthetic",
       "language": "en",
-      "structure": ["tables", "multi-page"],
-      "graphics": ["vector rules"],
+      "structure": [
+        "tables",
+        "multi-page"
+      ],
+      "graphics": [
+        "vector rules"
+      ],
       "font_issues": [],
       "orientation": "portrait",
       "mode": "faithful",
-      "min_similarity": 0.30,
+      "min_similarity": 0.3,
       "check_tables": true,
       "notes": "Same header row on two pages."
     },
@@ -147,7 +190,9 @@
       "file": "files/links_sample.pdf",
       "producer": "synthetic",
       "language": "en",
-      "structure": ["links"],
+      "structure": [
+        "links"
+      ],
       "graphics": [],
       "font_issues": [],
       "orientation": "portrait",
@@ -160,12 +205,16 @@
       "file": "files/fake_bold_overprint.pdf",
       "producer": "synthetic",
       "language": "en",
-      "structure": ["flowing text"],
+      "structure": [
+        "flowing text"
+      ],
       "graphics": [],
-      "font_issues": ["fake bold overprint"],
+      "font_issues": [
+        "fake bold overprint"
+      ],
       "orientation": "portrait",
       "mode": "faithful",
-      "min_similarity": 0.40,
+      "min_similarity": 0.4,
       "notes": "Same Latin words drawn twice with a sub-point offset."
     },
     {
@@ -173,9 +222,16 @@
       "file": "files/rtl_mixed_runs.pdf",
       "producer": "synthetic",
       "language": "ar",
-      "structure": ["flowing text", "columns"],
-      "graphics": ["vector rules"],
-      "font_issues": ["fake bold overprint"],
+      "structure": [
+        "flowing text",
+        "columns"
+      ],
+      "graphics": [
+        "vector rules"
+      ],
+      "font_issues": [
+        "fake bold overprint"
+      ],
       "orientation": "portrait",
       "mode": "faithful",
       "min_similarity": 0.35,
@@ -186,9 +242,17 @@
       "file": "files/bilingual_bordered_table.pdf",
       "producer": "synthetic",
       "language": "ar+en",
-      "structure": ["tables", "columns", "bilingual side-by-side"],
-      "graphics": ["vector rules"],
-      "font_issues": ["fake bold overprint"],
+      "structure": [
+        "tables",
+        "columns",
+        "bilingual side-by-side"
+      ],
+      "graphics": [
+        "vector rules"
+      ],
+      "font_issues": [
+        "fake bold overprint"
+      ],
       "orientation": "portrait",
       "mode": "faithful",
       "min_similarity": 0.35,
@@ -199,9 +263,20 @@
       "file": "files/related_party_bilingual.pdf",
       "producer": "Word (Ghostscript)",
       "language": "ar+en",
-      "structure": ["two-column bilingual table", "numbered lists", "revision table", "cover page"],
-      "graphics": ["logo", "borders"],
-      "font_issues": ["lam-alef ligatures map to wrong code points", "fake bold overprint"],
+      "structure": [
+        "two-column bilingual table",
+        "numbered lists",
+        "revision table",
+        "cover page"
+      ],
+      "graphics": [
+        "logo",
+        "borders"
+      ],
+      "font_issues": [
+        "lam-alef ligatures map to wrong code points",
+        "fake bold overprint"
+      ],
       "orientation": "portrait",
       "mode": "faithful",
       "min_similarity": 0.55,
@@ -212,9 +287,20 @@
       "file": "files/competition_guide_ar.pdf",
       "producer": "macOS Quartz PDFContext",
       "language": "ar",
-      "structure": ["contents page", "flowing text", "infographics", "headers and footers"],
-      "graphics": ["logos", "icons", "vector art"],
-      "font_issues": ["Sakkal Majalla map stores Arabic letters as Latin letters and symbols"],
+      "structure": [
+        "contents page",
+        "flowing text",
+        "infographics",
+        "headers and footers"
+      ],
+      "graphics": [
+        "logos",
+        "icons",
+        "vector art"
+      ],
+      "font_issues": [
+        "Sakkal Majalla map stores Arabic letters as Latin letters and symbols"
+      ],
       "orientation": "portrait",
       "mode": "editable",
       "min_similarity": 0.5,
@@ -225,9 +311,13 @@
       "file": "files/broken_cmap_arabic.pdf",
       "producer": "synthetic (Noto Naskh Arabic, ToUnicode replaced with Latin letters and symbols)",
       "language": "ar",
-      "structure": ["two lines"],
+      "structure": [
+        "two lines"
+      ],
       "graphics": [],
-      "font_issues": ["every glyph stored as a Latin letter or symbol, as macOS Quartz does with some Arabic fonts"],
+      "font_issues": [
+        "every glyph stored as a Latin letter or symbol, as macOS Quartz does with some Arabic fonts"
+      ],
       "orientation": "landscape",
       "mode": "editable",
       "min_similarity": 0.5,
@@ -238,9 +328,13 @@
       "file": "files/ligature_split_arabic.pdf",
       "producer": "PyMuPDF insert_htmlbox (Noto Naskh Arabic)",
       "language": "ar",
-      "structure": ["two lines"],
+      "structure": [
+        "two lines"
+      ],
       "graphics": [],
-      "font_issues": ["lam-alef drawn as two glyphs and stored as U+FFFD and control codes"],
+      "font_issues": [
+        "lam-alef drawn as two glyphs and stored as U+FFFD and control codes"
+      ],
       "orientation": "landscape",
       "mode": "editable",
       "min_similarity": 0.5,
@@ -251,9 +345,18 @@
       "file": "files/jouan_thesis_en.pdf",
       "producer": "Word via ilovepdf",
       "language": "en",
-      "structure": ["thesis", "contents", "figures", "tables"],
-      "graphics": ["figures"],
-      "font_issues": ["many Times New Roman fonts of one name on each page"],
+      "structure": [
+        "thesis",
+        "contents",
+        "figures",
+        "tables"
+      ],
+      "graphics": [
+        "figures"
+      ],
+      "font_issues": [
+        "many Times New Roman fonts of one name on each page"
+      ],
       "orientation": "portrait",
       "mode": "editable",
       "min_similarity": 0.5,
@@ -264,9 +367,18 @@
       "file": "files/guide_extract_7p.pdf",
       "producer": "Microsoft: Print To PDF",
       "language": "ar",
-      "structure": ["contents", "coloured definitions table", "coloured 5-column table"],
-      "graphics": ["logos", "banners"],
-      "font_issues": ["no text layer: every glyph is a vector drawing"],
+      "structure": [
+        "contents",
+        "coloured definitions table",
+        "coloured 5-column table"
+      ],
+      "graphics": [
+        "logos",
+        "banners"
+      ],
+      "font_issues": [
+        "no text layer: every glyph is a vector drawing"
+      ],
       "orientation": "portrait",
       "mode": "editable",
       "min_similarity": 0.5,
@@ -277,13 +389,41 @@
       "file": "files/guide_split_7p.pdf",
       "producer": "iLovePDF (split)",
       "language": "ar",
-      "structure": ["coloured definitions table over two pages"],
-      "graphics": ["logos", "banners"],
-      "font_issues": ["Sakkal Majalla map stores Arabic letters as Latin letters"],
+      "structure": [
+        "coloured definitions table over two pages"
+      ],
+      "graphics": [
+        "logos",
+        "banners"
+      ],
+      "font_issues": [
+        "Sakkal Majalla map stores Arabic letters as Latin letters"
+      ],
       "orientation": "portrait",
       "mode": "editable",
       "min_similarity": 0.5,
       "notes": "Page 4: each label cell is one big box with a highlight box per text line inside it."
+    },
+    {
+      "id": "lt13_programme_en",
+      "file": "files/lt13_programme_en.pdf",
+      "producer": "Microsoft Word",
+      "language": "en",
+      "structure": [
+        "cover picture in a table",
+        "agenda table",
+        "speaker table with photos"
+      ],
+      "graphics": [
+        "photos",
+        "dark header rows",
+        "cell shading"
+      ],
+      "font_issues": [],
+      "orientation": "portrait",
+      "mode": "editable",
+      "min_similarity": 0.5,
+      "notes": "Word draws borders as thin bars and shades every text line again; a line finder split each row into nine columns. PyMuPDF's layout step crashed the process on it."
     }
   ],
   "missing_categories": [

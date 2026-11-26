@@ -29,6 +29,8 @@ page are left out of the table.
 
 from __future__ import annotations
 
+from core.safe_tables import find_tables as _safe_find_tables
+
 import contextvars
 from datetime import date
 import hashlib
@@ -961,7 +963,7 @@ def _table_from_matrix(matrix: list[list[str]], page_index: int = 0) -> Extracte
 def _line_tables(page: fitz.Page) -> list:
     """Prefer ruled grids. Invoices and statements usually draw those lines."""
     try:
-        found = page.find_tables(vertical_strategy="lines", horizontal_strategy="lines")
+        found = _safe_find_tables(page, vertical_strategy="lines", horizontal_strategy="lines")
         tables = list(getattr(found, "tables", []) or [])
         if tables:
             return tables
@@ -970,7 +972,7 @@ def _line_tables(page: fitz.Page) -> list:
     except Exception:
         return []
     try:
-        found = page.find_tables()
+        found = _safe_find_tables(page)
         return list(getattr(found, "tables", []) or [])
     except Exception:
         return []
@@ -10086,7 +10088,7 @@ def _embedded_figure_bytes(doc: fitz.Document, xref: int) -> bytes | None:
 def _ruled_table_boxes(page: fitz.Page) -> list[fitz.Rect]:
     """Borders of a real grid. Those strokes are the table, not a chart."""
     try:
-        found = page.find_tables(vertical_strategy="lines", horizontal_strategy="lines")
+        found = _safe_find_tables(page, vertical_strategy="lines", horizontal_strategy="lines")
         tables = list(getattr(found, "tables", []) or [])
     except Exception:
         return []

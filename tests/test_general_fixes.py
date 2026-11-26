@@ -333,3 +333,118 @@ def test_coloured_table_wins_over_a_line_grid_found_on_it(monkeypatch):
     monkeypatch.setattr(table_rebuild, "_is_prose_column_frame", lambda page, table: False)
     kinds = [region.kind for region in table_rebuild.classify_regions(page) if "table" in region.kind]
     assert kinds == ["fill_table"]
+
+
+# --- Word tables: thin border bars, shading boxes, pictures in cells ---------
+
+LT13 = FILES / "lt13_programme_en.pdf"
+
+
+def _word_style_table(path: Path) -> None:
+    """A 3-column, 3-row table drawn the way Word exports it."""
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    xs = [50, 120, 260, 545]
+    ys = [100, 120, 170, 220]
+    grey = (0.8, 0.83, 0.88)
+    for r in range(3):
+        for c in range(3):
+            cell = fitz.Rect(xs[c], ys[r], xs[c + 1], ys[r + 1])
+            shade = (0.06, 0.09, 0.17) if r == 0 else ((0.89, 0.91, 0.94) if c == 0 else (1, 1, 1))
+            page.draw_rect(cell, color=None, fill=shade)
+            # Word shades each text line again inside the cell.
+            page.draw_rect(fitz.Rect(cell.x0 + 4, cell.y0 + 4, cell.x1 - 4, cell.y0 + 15), color=None, fill=shade)
+            ink = (1, 1, 1) if r == 0 else (0, 0, 0)
+            page.insert_text((cell.x0 + 5, cell.y0 + 13), f"R{r}C{c} word", fontsize=8, color=ink)
+    for y in ys:
+        page.draw_rect(fitz.Rect(xs[0], y - 0.25, xs[-1], y + 0.25), color=None, fill=grey)
+    for x in xs:
+        page.draw_rect(fitz.Rect(x - 0.25, ys[0], x + 0.25, ys[-1]), color=None, fill=grey)
+    doc.save(path)
+
+
+def test_thin_border_bars_make_the_grid(tmp_path):
+    from core.table_rebuild import rule_grids
+
+    pdf = tmp_path / "word_table.pdf"
+    _word_style_table(pdf)
+    grids = rule_grids(fitz.open(pdf)[0])
+    assert len(grids) == 1
+    columns, rows_y, _cells = grids[0]
+    assert len(columns) == 4 and len(rows_y) == 4
+
+
+def test_word_table_keeps_three_columns_in_editable_mode(tmp_path):
+    pdf = tmp_path / "word_table.pdf"
+    _word_style_table(pdf)
+    build = read_word_build(pdf, options=WordOptions(mode="editable", fit_a4=True, direction="auto"))
+    tables = [b for page in build.pages for b in page.blocks if type(b).__name__ == "TableBlock"]
+    assert len(tables) == 1
+    assert [len(row) for row in tables[0].rows] == [3, 3, 3]
+    assert tables[0].rows[1][2] == "R1C2 word"
+
+
+def test_find_tables_never_runs_the_layout_step():
+    from core import safe_tables
+
+    seen = {}
+
+    class Page:
+        def find_tables(self, **kwargs):
+            seen.update(kwargs)
+            return []
+
+    safe_tables.find_tables(Page(), vertical_strategy="lines")
+    if safe_tables._HAS_LAYOUT:
+        assert seen.get("use_layout") is False
+    assert seen.get("vertical_strategy") == "lines"
+
+
+def test_digits_inside_a_footer_line_stay(tmp_path):
+    from core.docx_converter import _read_footer
+
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((60, 820), "Venue x 30 November 2026 x Asia 2026", fontsize=8)
+    page.insert_text((530, 820), "7", fontsize=8)
+    title, _label, number, _gap = _read_footer(page)
+    assert "30 November 2026" in title and title.endswith("2026")
+    assert number == 7
+
+
+def test_raised_mark_does_not_split_its_line():
+    from core.docx_converter import _cluster_baselines
+    from core.arabic_fixer import _Atom
+
+    def atom(text, x, oy):
+        return _Atom(text, x, oy - 10, x + 5, oy + 3, x, oy, 0, 15.0, False)
+
+    line = [atom("ب", 10, 429.8), atom("ت", 20, 429.4), atom("ّ", 30, 425.3), atom("ث", 40, 429.8)]
+    assert len(_cluster_baselines(line)) == 1
+
+
+@pytest.mark.skipif(not LT13.exists(), reason="sample missing")
+def test_word_programme_tables_and_photos():
+    build = read_word_build(LT13, options=WordOptions(mode="editable", fit_a4=True, direction="auto", page_spec="2-3"))
+    agenda, speakers = [[b for b in page.blocks if type(b).__name__ == "TableBlock"] for page in build.pages]
+    assert len(agenda) == 1 and len(agenda[0].rows) == 9 and all(len(row) == 3 for row in agenda[0].rows)
+    assert agenda[0].rows[0] == ["Time", "Session & Venue", "Session Description & Objectives"]
+    assert len(speakers) == 1 and len(speakers[0].images) == 3
+
+
+def test_cards_side_by_side_become_one_table_row(tmp_path):
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 60, 70), False)
+    pix.clear_with(230)
+    png = pix.tobytes("png")
+    for k, x in enumerate((40, 220, 400)):
+        page.insert_image(fitz.Rect(x, 200, x + 160, 400), stream=png)
+        for line in range(3):
+            page.insert_text((x + 20, 320 + line * 14), f"card{k} line{line} text", fontsize=9)
+    pdf = tmp_path / "cards.pdf"
+    doc.save(pdf)
+    build = read_word_build(pdf, options=WordOptions(mode="editable", fit_a4=True, direction="auto"))
+    tables = [b for page in build.pages for b in page.blocks if type(b).__name__ == "TableBlock"]
+    assert len(tables) == 1 and len(tables[0].rows) == 1 and len(tables[0].rows[0]) == 3
+    assert tables[0].rows[0][0].startswith("card0 line0")

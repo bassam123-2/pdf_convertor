@@ -407,6 +407,11 @@ def blocks_from_faithful(page, payload) -> list:
             fills=[list(row) for row in (getattr(table, "fills", None) or [])],
             widths=list(getattr(table, "widths", None) or []),
             rules=bool(getattr(table, "rules", True)),
+            spans=[list(row) for row in (getattr(table, "spans", None) or [])],
+            images=list(getattr(table, "images", None) or []),
+            styles=dict(getattr(table, "styles", None) or {}),
+            centered=bool(getattr(table, "centered", False)),
+            aligns=dict(getattr(table, "aligns", None) or {}),
         )
         if sizes:
             # The cells' own type size (the writer starts from 11 pt), set
