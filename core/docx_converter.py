@@ -3158,7 +3158,14 @@ def extract_page(
         figures = _release_text_panels(figures, atoms)
         tables = _without_figure_tables(tables, figures)
         if reading == "digital":
-            tables += _coloured_tables(page, tables)
+            coloured = _coloured_tables(page, [])
+            if coloured:
+                # Over the same area the coloured-cell reading wins: a line
+                # finder takes its white gaps for a grid and splits its rows.
+                tables = [
+                    table for table in tables
+                    if not any(_overlap_ratio(table.bbox, c.bbox) > 0.3 or _overlap_ratio(c.bbox, table.bbox) > 0.3 for c in coloured)
+                ] + coloured
         else:
             # Text read from the page picture: tables are read from it too.
             tables += _picture_tables(page, tables)

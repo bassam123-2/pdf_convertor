@@ -314,3 +314,22 @@ def test_label_cells_with_line_highlights_keep_their_rows():
     page = fitz.open(SPLIT_GUIDE)[3]
     tables = table_rebuild.fill_tables(page)
     assert len(tables) == 1 and len(tables[0].rows) == 3
+
+
+@pytest.mark.skipif(not SPLIT_GUIDE.is_file(), reason="sample missing")
+def test_coloured_table_wins_over_a_line_grid_found_on_it(monkeypatch):
+    # Newer PyMuPDF builds see the white gaps of a coloured table as a ruled
+    # grid; that grid then failed to rebuild and the page lost its table.
+    from core import table_rebuild
+
+    class Grid:
+        bbox = (52, 92, 546, 312)
+
+    class Found:
+        tables = [Grid()]
+
+    page = fitz.open(SPLIT_GUIDE)[3]
+    monkeypatch.setattr(fitz.Page, "find_tables", lambda self, *a, **k: Found())
+    monkeypatch.setattr(table_rebuild, "_is_prose_column_frame", lambda page, table: False)
+    kinds = [region.kind for region in table_rebuild.classify_regions(page) if "table" in region.kind]
+    assert kinds == ["fill_table"]

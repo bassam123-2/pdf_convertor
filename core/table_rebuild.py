@@ -211,10 +211,14 @@ def classify_regions(page: fitz.Page) -> list[ImageRegion]:
         )
 
     # Tables drawn with coloured cells and no rules (a label column of
-    # filled boxes, text beside it).
+    # filled boxes, text beside it). Such a table also has white gaps that
+    # a line finder may take for a ruled grid, which then splits its rows
+    # badly; over the same area the coloured-cell reading wins.
     for region in _fill_tables(page, atoms):
-        if any(_overlap_ratio(region.bbox, r.bbox) > 0.3 for r in regions):
-            continue
+        regions = [
+            r for r in regions
+            if not (r.kind == "vector_table" and (_overlap_ratio(r.bbox, region.bbox) > 0.3 or _overlap_ratio(region.bbox, r.bbox) > 0.3))
+        ]
         regions.append(region)
 
     # Embedded images: table picture vs chart vs other.
