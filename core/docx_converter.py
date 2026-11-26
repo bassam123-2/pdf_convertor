@@ -4335,6 +4335,10 @@ def _add_table(
             text = _clean_flow_text(text)
             run = paragraph.add_run(text) if text else None
             font_size = max(7.5, 11.0 * block.fit_scale)
+            if getattr(block, "text_font", ""):
+                from core.flow_layout import _width_factor
+
+                font_size *= _width_factor(text or "", block.text_font)
             if run is not None:
                 _set_run_font(run, font_size, row_index == 0 and header_row and block.rules and not block.fills)
             if text and re.fullmatch(r"[\d٠-٩]{1,4}", text):

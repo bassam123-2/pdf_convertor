@@ -406,13 +406,17 @@ def blocks_from_faithful(page, payload) -> list:
             rules=bool(getattr(table, "rules", True)),
         )
         if sizes:
-            # The cells' own type size (the writer starts from 11 pt).
+            # The cells' own type size (the writer starts from 11 pt), set
+            # smaller when the output font is wider than the PDF's.
             block.fit_scale = max(0.7, min(1.6, sizes[len(sizes) // 2] / 11.0))
+            block.text_font = getattr(table, "text_font", "") or ""
         blocks.append(block)
 
     def inside_table(line) -> bool:
+        # A cell's first line can start a little above the drawn cell.
         cx, cy = (line.x0 + line.x1) / 2.0, (line.y0 + line.y1) / 2.0
-        return any(b[0] <= cx <= b[2] and b[1] <= cy <= b[3] for b in table_boxes)
+        reach = max(4.0, (line.y1 - line.y0) * 0.8)
+        return any(b[0] - 2 <= cx <= b[2] + 2 and b[1] - reach <= cy <= b[3] + reach for b in table_boxes)
 
     for line in payload.lines:
         if not (line.text or "").strip() or inside_table(line):

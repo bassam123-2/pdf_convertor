@@ -2008,9 +2008,12 @@ def _write_floating_table(document, table, scale: float, off_x: float, off_y: fl
     if old_layout is not None:
         props.remove(old_layout)
     props.append(layout)
-    if getattr(table, "rtl", False):
-        bidi = OxmlElement("w:bidiVisual")
-        props.append(bidi)
+    # Cells are stored in printed order, left to right. A right-to-left
+    # table (bidiVisual) would mirror them: the Arabic label column of a
+    # definitions table would land on the left. Say left to right outright.
+    bidi = OxmlElement("w:bidiVisual")
+    bidi.set(qn("w:val"), "0")
+    props.append(bidi)
 
     _order_tbl_pr(props)
 
@@ -2073,11 +2076,23 @@ def _write_floating_table(document, table, scale: float, off_x: float, off_y: fl
                 header_white = r * 0.3 + g * 0.59 + b * 0.11 < 150
             # Keep multi-line cells (stacked dates) as soft breaks, not one glued run.
             parts = (text or "").split("\n") or [""]
+            from core.docx_converter import _arabic_count, _set_paragraph_ltr, _set_paragraph_rtl, _set_run_font
+
+            arabic_cell = _arabic_count(text or "") >= len(re.findall(r"[A-Za-z]", text or ""))
+            if text and arabic_cell:
+                _set_paragraph_rtl(paragraph, text)
+            elif text:
+                _set_paragraph_ltr(paragraph)
+            size = max(6.5, min(16.0, float(getattr(table, "text_size", 0) or 9.0) * scale))
+            # A wider output font takes the narrower PDF font's room.
+            from core.flow_layout import _width_factor
+
+            size *= _width_factor(text or "", getattr(table, "text_font", "") or "")
             for index, part in enumerate(parts):
                 if index:
                     paragraph.add_run().add_break()
                 run = paragraph.add_run(part)
-                run.font.size = Emu(int(9 * 12700))
+                _set_run_font(run, size, bool(header_white), part)
                 if header_white:
                     run.bold = True
                     run.font.color.rgb = RGBColor(255, 255, 255)

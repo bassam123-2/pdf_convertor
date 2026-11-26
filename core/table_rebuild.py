@@ -299,6 +299,38 @@ def rebuild_tables(page: fitz.Page, regions: list[ImageRegion] | None = None) ->
     """Build native tables for vector and raster regions on this page."""
     regions = regions if regions is not None else classify_regions(page)
     rebuilt: list[RebuiltTable] = []
+    found = _build_tables(page, regions)
+    for table in found:
+        # The type size and family the PDF set the cells in, for the Word cells.
+        table.text_size, table.text_font = _text_size(page, table.bbox)
+    return found
+
+
+def _text_size(page: fitz.Page, bbox) -> tuple[float, str]:
+    sizes = []
+    fonts: dict[str, int] = {}
+    try:
+        for trace in page.get_texttrace() or []:
+            size = float(trace.get("size") or 0)
+            for raw in trace.get("chars") or []:
+                x0, y0, x1, y1 = raw[3]
+                if bbox[0] <= (x0 + x1) / 2 <= bbox[2] and bbox[1] <= (y0 + y1) / 2 <= bbox[3] and chr(raw[0]).strip():
+                    sizes.append(size)
+                    name = str(trace.get("font") or "")
+                    fonts[name] = fonts.get(name, 0) + 1
+    except Exception:
+        return 0.0, ""
+    sizes = sorted(s for s in sizes if s > 0)
+    font = ""
+    if fonts:
+        from core.font_catalog import _spaced
+
+        font = _spaced(max(fonts, key=fonts.get))
+    return (sizes[len(sizes) // 2] if sizes else 0.0), font
+
+
+def _build_tables(page: fitz.Page, regions: list[ImageRegion]) -> list[RebuiltTable]:
+    rebuilt: list[RebuiltTable] = []
     for region in regions:
         if region.kind == "vector_table":
             item = _rebuild_vector(page, region)
