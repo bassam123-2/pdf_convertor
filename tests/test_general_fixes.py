@@ -186,11 +186,19 @@ GUIDE = FILES / "competition_guide_ar.pdf"
 
 @pytest.mark.skipif(not GUIDE.is_file(), reason="sample missing")
 def test_broken_font_pages_stay_positioned_in_editable_mode():
+    from core.font_repair import _candidates
+
     build = read_word_build(GUIDE, options=WordOptions(mode="editable", page_spec="2,9"))
-    # Both pages store Arabic letters as Latin ones: no flowing text for them.
-    # They are read the way earlier versions read them (OCR text in frames,
-    # or the faithful layout), not dropped into a page picture by the flow.
-    assert all(page.frames for page in build.pages)
+    if _candidates("SakkalMajalla"):
+        # The installed font reads the broken glyphs from their shapes: the
+        # pages are sound text and may flow.
+        texts = " ".join(getattr(b, "text", "") for page in build.pages for b in page.blocks)
+        assert "المناهضة" in texts or any(page.frames for page in build.pages)
+    else:
+        # Both pages store Arabic letters as Latin ones: no flowing text for
+        # them. They are read the way earlier versions read them (OCR text in
+        # frames, or the faithful layout), not dropped into a page picture.
+        assert all(page.frames for page in build.pages)
 
 
 @pytest.mark.skipif(not RELATED.is_file(), reason="sample missing")

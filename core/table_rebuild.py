@@ -608,8 +608,15 @@ def is_decoration(page: fitz.Page, bbox) -> bool:
 
 
 def _prose_over(page: fitz.Page, bbox: tuple) -> bool:
-    """True when the text over a picture is mostly sentences, not short labels."""
-    long_spans = spans = 0
+    """
+    True when the text over a picture is mostly body text, not short labels.
+
+    A PDF may store one printed line as several pieces (a title, then its
+    dotted leader in three runs), so pieces on one baseline are joined into
+    a row first. A row of five words or more, or one running across most of
+    the picture, is body text; a chart's labels are short and scattered.
+    """
+    rows: list[list[float]] = []  # [y, x0, x1, words]
     try:
         for block in page.get_text("dict").get("blocks") or []:
             if block.get("type") != 0:
@@ -622,12 +629,22 @@ def _prose_over(page: fitz.Page, bbox: tuple) -> bool:
                 cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
                 if not (bbox[0] <= cx <= bbox[2] and bbox[1] <= cy <= bbox[3]):
                     continue
-                spans += 1
-                if len(text.split()) >= 5:
-                    long_spans += 1
+                words = len(text.split())
+                for row in rows:
+                    if abs(row[0] - cy) <= 3.0:
+                        row[1] = min(row[1], box[0])
+                        row[2] = max(row[2], box[2])
+                        row[3] += words
+                        break
+                else:
+                    rows.append([cy, box[0], box[2], words])
     except Exception:
         return False
-    return spans >= 4 and long_spans >= spans * 0.5
+    if len(rows) < 3:
+        return False
+    width = max(1.0, bbox[2] - bbox[0])
+    long_rows = sum(1 for _y, x0, x1, words in rows if words >= 5 or (x1 - x0) >= width * 0.5)
+    return long_rows >= len(rows) * 0.5
 
 
 def _text_boxes(page: fitz.Page) -> list[tuple[float, float, float, float]]:

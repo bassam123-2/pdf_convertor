@@ -1180,9 +1180,12 @@ def _attach_page_numbers(lines: list[_Line]) -> list[_Line]:
 
 def _toc_entry(text: str) -> tuple[str, str] | None:
     """A contents line is a title, a dotted leader, and a page number."""
-    if not text or len(text) > 120:
+    if not text:
         return None
     cleaned = re.sub(r"(?:\.\s*){2,}|[.\u00b7\u2022\u2024\u2026‧]{2,}", " ", text)
+    # The dotted leader makes a contents line long; its words are short.
+    if len(cleaned) > 120:
+        return None
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" .\t")
     match = re.match(r"^(?P<title>.+?)\s+(?P<page>\d{1,3})$", cleaned)
     if match is None:
@@ -4700,16 +4703,31 @@ def _header_body_top(page: fitz.Page) -> float:
     """The top of the first real line. The logo crop stops above it."""
     height = float(page.rect.height)
     cap = height * 0.125
+    # Each atom is one glyph: any letter or digit of body size counts. A
+    # filled box of the body (a table cell, a banner) counts too, so a table
+    # that starts high on the page is never cut into the header picture.
     tops = [
         atom.y0
         for atom in _atoms_on_page(page)
         if atom.text.strip()
         and atom.y0 > height * 0.06
-        and (
-            _arabic_count(atom.text) >= 2
-            or sum(1 for char in atom.text if char.isascii() and char.isalpha()) >= 2
-        )
+        and float(atom.size or 0) >= 6
+        and any(char.isalnum() for char in atom.text)
     ]
+    try:
+        from core.table_rebuild import is_box, visible_drawings
+
+        for drawing in visible_drawings(page):
+            rect = drawing.get("rect")
+            fill = drawing.get("fill")
+            if (
+                rect is not None and fill and is_box(drawing)
+                and rect.y0 > height * 0.06 and rect.width >= 40 and rect.height >= 10
+                and not all(channel >= 0.94 for channel in fill[:3])
+            ):
+                tops.append(float(rect.y0))
+    except Exception:
+        pass
     if not tops:
         return cap
     return min(cap, min(tops) - 3.0)

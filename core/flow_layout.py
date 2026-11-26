@@ -258,6 +258,9 @@ def _write_blocks(host, blocks: list, width_pt: float, height_pt: float, documen
         elif kind == "image":
             if getattr(block, "data", None) and write_image(host, block, width_pt, height_pt):
                 counts["images"] = counts.get("images", 0) + 1
+        elif block.role == "toc" and block.toc_page:
+            conv._add_text(host, block, width_pt)
+            counts["paragraphs"] = counts.get("paragraphs", 0) + 1
         else:
             write_paragraph(host, block, conv)
             key = "headings" if block.kind == "heading" else "paragraphs"
@@ -429,6 +432,9 @@ def blocks_from_faithful(page, payload) -> list:
             painted = [c.color for c in chunks if c.color and c.color.lstrip("#").lower() not in {"000000", "000"}]
             if len(painted) >= len(chunks) * 0.6:
                 color = painted[0]
+        from core.docx_converter import _toc_entry
+
+        entry = _toc_entry(line.text) if re.search(r"\.{4,}|…{2,}", line.text or "") else None
         block = TextBlock(
             kind="heading" if bold and len(line.text) < 90 else "paragraph",
             bbox=(line.x0, line.y0, line.x1, line.y1),
@@ -448,6 +454,10 @@ def blocks_from_faithful(page, payload) -> list:
             from core.font_catalog import _spaced
 
             block.font = _spaced(max(fonts, key=fonts.get))
+        if entry:
+            # A contents line: title, dotted leader, page number at the far end.
+            block.role = "toc"
+            block.text, block.toc_page = entry
         if color and _light(color):
             # White letters on a coloured banner: without the banner they
             # vanish on white paper, so the banner's colour goes behind them.
