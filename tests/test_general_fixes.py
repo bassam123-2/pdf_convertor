@@ -294,3 +294,15 @@ def test_a_box_is_a_rectangle_not_a_letter():
     assert is_box({"items": [("re", rect, 1)], "rect": rect})
     letter = [("l", fitz.Point(0, 0), fitz.Point(1, 1))] * 9 + [("c", 0, 0, 0, 0)] * 6
     assert not is_box({"items": letter, "rect": fitz.Rect(0, 0, 8, 10)})
+
+
+SPLIT_GUIDE = FILES / "guide_split_7p.pdf"
+
+
+@pytest.mark.skipif(not SPLIT_GUIDE.is_file(), reason="sample missing")
+def test_label_cells_with_line_highlights_keep_their_rows():
+    from core import table_rebuild
+
+    page = fitz.open(SPLIT_GUIDE)[3]
+    tables = table_rebuild.fill_tables(page)
+    assert len(tables) == 1 and len(tables[0].rows) == 3

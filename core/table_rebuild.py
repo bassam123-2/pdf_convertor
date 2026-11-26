@@ -413,7 +413,10 @@ def _fill_tables(page: fitz.Page, atoms: list[tuple]) -> list[ImageRegion]:
         b0, b1 = label_span(b)
         return min(a1, b1) - max(a0, b0) >= min(a1 - a0, b1 - b0) * 0.5
 
-    found.sort(key=lambda region: -len(region.geometry["rows"]))
+    # The stack covering more of the table wins: a cell is often drawn as
+    # one big box with a smaller highlight per text line inside it, and
+    # the big boxes are the rows.
+    found.sort(key=lambda region: (-(region.bbox[3] - region.bbox[1]), -len(region.geometry["rows"])))
     kept: list[ImageRegion] = []
     for region in found:
         if any(same_column(region, other) and _overlap_ratio(region.bbox, other.bbox) > 0.15 for other in kept):

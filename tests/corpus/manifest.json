@@ -271,6 +271,19 @@
       "mode": "editable",
       "min_similarity": 0.5,
       "notes": "Glyph drawings were read as black bars behind the OCR text; its tables are read from the page picture."
+    },
+    {
+      "id": "guide_split_7p",
+      "file": "files/guide_split_7p.pdf",
+      "producer": "iLovePDF (split)",
+      "language": "ar",
+      "structure": ["coloured definitions table over two pages"],
+      "graphics": ["logos", "banners"],
+      "font_issues": ["Sakkal Majalla map stores Arabic letters as Latin letters"],
+      "orientation": "portrait",
+      "mode": "editable",
+      "min_similarity": 0.5,
+      "notes": "Page 4: each label cell is one big box with a highlight box per text line inside it."
     }
   ],
   "missing_categories": [
