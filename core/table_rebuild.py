@@ -518,9 +518,9 @@ def _rebuild_cards(page: fitz.Page, region: ImageRegion) -> RebuiltTable | None:
     """One row of cards as one table row: each card's picture top, then its words."""
     try:
         from core.docx_converter import _atoms_in, _atoms_on_page, _cell_runs, _cluster_baselines, _separate_overlapping_atoms
-        from core.faithful import _dedupe_fake_bold
+        from core.faithful import page_reading
 
-        atoms = _separate_overlapping_atoms(_dedupe_fake_bold(_atoms_on_page(page, upright_only=True)))
+        atoms = page_reading(page).letters
     except Exception:
         return None
     for row in card_rows(page, _text_boxes(page)):
@@ -581,9 +581,9 @@ def _rebuild_rules(page: fitz.Page, region: ImageRegion) -> RebuiltTable | None:
     """A table read cell by cell from the grid its drawn borders make."""
     try:
         from core.docx_converter import _atoms_on_page, _cell_alignment, _cell_runs, _drawing_paints, _paint_at, _separate_overlapping_atoms
-        from core.faithful import _dedupe_fake_bold
+        from core.faithful import page_reading
 
-        atoms = _separate_overlapping_atoms(_dedupe_fake_bold(_atoms_on_page(page, upright_only=True)))
+        atoms = page_reading(page).letters
     except Exception:
         return None
     for columns, rows_y, cells in rule_grids(page):
@@ -1189,9 +1189,9 @@ def _reread_cells(page: fitz.Page, bbox: tuple, rows: list[list[str]], widths: l
     try:
         from core.docx_converter import _atoms_in, _atoms_on_page, _cluster_baselines, _logical_text, _separate_overlapping_atoms
         from core.arabic_fixer import plain_arabic
-        from core.faithful import _dedupe_fake_bold
+        from core.faithful import page_reading
 
-        atoms = _separate_overlapping_atoms(_dedupe_fake_bold(_atoms_on_page(page, upright_only=True)))
+        atoms = page_reading(page).letters
     except Exception:
         return rows
     x_edges = [float(bbox[0])]

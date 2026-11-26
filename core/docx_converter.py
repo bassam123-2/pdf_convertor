@@ -417,7 +417,7 @@ def _atoms_on_page(page: fitz.Page, upright_only: bool = False) -> list[_Atom]:
                 current.y1 = max(current.y1, float(box[3]))
                 continue
             current = _Atom(
-                chr(raw[0]),
+                _symbol_char(chr(raw[0]), font),
                 float(box[0]),
                 float(box[1]),
                 float(box[2]),
@@ -437,6 +437,31 @@ def _atoms_on_page(page: fitz.Page, upright_only: bool = False) -> list[_Atom]:
     _repair_ligatures(page, atoms)
     atoms.extend(_gap_spaces(atoms))
     return atoms
+
+
+# What the common symbol fonts draw at the letters Word stores for them.
+_WINGDINGS = {
+    "l": "●", "n": "■", "q": "❑", "u": "◆", "v": "❖", "w": "⬥", "§": "▪", "Ø": "➢",
+    "ü": "✓", "þ": "☑", "ý": "☒", "o": "□", "p": "□", "J": "☺", "Ÿ": "•", "è": "➔",
+}
+_SYMBOL = {"·": "•", "§": "♣", "¨": "♦", "©": "♥", "ª": "♠", "®": "→", "Þ": "⇒"}
+
+
+def _symbol_char(char: str, font: str) -> str:
+    """
+    The sign a symbol font draws, not the letter it is stored as.
+
+    Wingdings stores its check mark as "ü" and its arrow bullet as "Ø"; read
+    as letters they stick to the word beside them ("üتعيين"). Private-use
+    codes (U+F0xx) are the same signs shifted.
+    """
+    name = font.lower()
+    if not any(key in name for key in ("wingding", "webding", "symbol", "dingbat")):
+        return char
+    if 0xF020 <= ord(char) <= 0xF0FF:
+        char = chr(ord(char) - 0xF000)
+    table = _SYMBOL if "symbol" in name else _WINGDINGS
+    return table.get(char, "•" if char.strip() else char)
 
 
 def _shape_repaired(page: fitz.Page, traces: list) -> list:
@@ -1694,7 +1719,92 @@ def _encoding_broken(page: fitz.Page, atoms: list[_Atom]) -> bool:
     return mixed >= 5 and mixed / arabic_tokens >= 0.06
 
 
+@dataclass
+class _OcrBox:
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+@dataclass
+class _OcrWord:
+    text: str
+    bounding_rect: _OcrBox
+
+
+@dataclass
+class _OcrLine:
+    words: list
+
+
+@dataclass
+class _OcrResult:
+    lines: list
+
+
 def _recognize_png(data: bytes):
+    """
+    Read one rendered page: Windows Arabic OCR, or Tesseract where Windows has none.
+
+    Both give lines of words with a box each, in the picture's pixels.
+    """
+    result = _recognize_png_windows(data)
+    if result is not None:
+        return result
+    return _recognize_png_tesseract(data)
+
+
+def _recognize_png_tesseract(data: bytes):
+    """Tesseract's words (Arabic and English) in the shape Windows OCR returns."""
+    import os
+    import subprocess
+    import tempfile
+
+    if os.environ.get("PDF_TOOL_TESSERACT_OCR", "1") == "0":
+        return None
+    try:
+        from core.image_tables import tessdata_for
+        from engine.tesseract_bin import find_exe
+
+        exe = find_exe()
+        tessdata, langs = tessdata_for()
+    except Exception:
+        return None
+    if not exe or not tessdata or "ara" not in (langs or ""):
+        return None
+    with tempfile.TemporaryDirectory(prefix="pdf_tool_ocr_") as work:
+        path = os.path.join(work, "page.png")
+        with open(path, "wb") as handle:
+            handle.write(data)
+        try:
+            done = subprocess.run(
+                [exe, path, "stdout", "-l", langs, "--psm", "3", "tsv"],
+                capture_output=True, text=True, encoding="utf-8",
+                env=dict(os.environ, TESSDATA_PREFIX=tessdata), timeout=180,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception:
+            return None
+    lines: dict[tuple, list] = {}
+    for row in (done.stdout or "").splitlines()[1:]:
+        parts = row.split("\t")
+        if len(parts) < 12 or parts[0] != "5":
+            continue
+        text = parts[11].strip()
+        try:
+            confidence = float(parts[10])
+        except ValueError:
+            confidence = -1
+        if not text or confidence < 30:
+            continue
+        key = (parts[2], parts[3], parts[4])
+        box = _OcrBox(float(parts[6]), float(parts[7]), float(parts[8]), float(parts[9]))
+        lines.setdefault(key, []).append(_OcrWord(text, box))
+    return _OcrResult([_OcrLine(words) for words in lines.values()])
+
+
+def _recognize_png_windows(data: bytes):
     """Read one rendered page with Windows Arabic OCR."""
     try:
         from winrt.runtime import ApartmentType, init_apartment
@@ -1986,7 +2096,7 @@ def _restore_layer_numbers(page: fitz.Page, atoms: list[_Atom]) -> list[_Atom]:
     return atoms
 
 
-def _ocr_word_atoms(page: fitz.Page) -> list[_Atom]:
+def _ocr_word_atoms(page: fitz.Page, clip: fitz.Rect | None = None) -> list[_Atom]:
     """
     Words read from the rendered page, already in logical Unicode.
 
@@ -1995,7 +2105,15 @@ def _ocr_word_atoms(page: fitz.Page) -> list[_Atom]:
     the Latin letters inside a picture of a wordmark is left out.
     """
     scale = 2.0
-    pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+    offset_x = offset_y = 0.0
+    if clip is not None:
+        # A strip of the page: read larger, so small type stays readable.
+        scale = 3.0
+        clip = fitz.Rect(clip) & page.rect
+        offset_x, offset_y = float(clip.x0), float(clip.y0)
+        pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=clip, alpha=False)
+    else:
+        pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
     try:
         result = _recognize_png(pixmap.tobytes("png"))
     except Exception:
@@ -2027,10 +2145,10 @@ def _ocr_word_atoms(page: fitz.Page) -> list[_Atom]:
             if any(char.isascii() and char.isalpha() for char in text) and not has_arabic:
                 continue
             box = item.bounding_rect
-            x0 = float(box.x) / scale
-            y0 = float(box.y) / scale
-            x1 = (float(box.x) + float(box.width)) / scale
-            y1 = (float(box.y) + float(box.height)) / scale
+            x0 = float(box.x) / scale + offset_x
+            y0 = float(box.y) / scale + offset_y
+            x1 = (float(box.x) + float(box.width)) / scale + offset_x
+            y1 = (float(box.y) + float(box.height)) / scale + offset_y
             short = quoted or (has_arabic and sum(1 for char in text if _is_arabic(char)) <= 1)
             if (x1 - x0 < 1 or y1 - y0 < 6) and not short:
                 continue
@@ -2078,6 +2196,8 @@ def _ocr_word_atoms(page: fitz.Page) -> list[_Atom]:
                     _color_near(sizes, (y0 + y1) / 2.0),
                 )
             )
+    if clip is not None:
+        return atoms
     atoms.extend(_left_margin_numbers(page, atoms))
     return _restore_layer_numbers(page, _restore_quoted_letters(page, atoms))
 
@@ -6703,6 +6823,8 @@ def read_word_build(
                     if _cancelled():
                         counts["skipped"].append("Conversion cancelled.")
                         break
+                    fallback = None
+                    use_faithful = False
                     try:
                         plan = plans.get(number)
                         strategy = plan.strategy if plan is not None else ("faithful" if faithful_mode else "editable")
@@ -6752,6 +6874,10 @@ def read_word_build(
                     except Exception as exc:
                         counts["skipped"].append(f"Page {number} was skipped. {exc}")
                         record = WordPage(number, [], float(page.rect.width), float(page.rect.height))
+                    record = _checked_page(
+                        record, page, _plumber_at(plumber, index), background_xrefs, furniture, schema,
+                        number, counts, options, fallback, use_faithful or faithful_mode,
+                    )
                     if record.kind == "scan":
                         counts["scans"] += 1
                     else:
@@ -6764,6 +6890,52 @@ def read_word_build(
     finally:
         _close_readers(document_pdf, plumber)
     return WordBuild(pages, page_count, counts, chrome, options)
+
+
+def _checked_page(record, page, plumber_page, background_xrefs, furniture, schema, number, counts, options, fallback, was_faithful):
+    """
+    Hold the page's words against the PDF page; read a weak page again.
+
+    A flowing page that lost a third of its words, or wrote many twice, is
+    read the positioned way too, and the reading that keeps more of the
+    page wins. Every page's score is kept for the report, with the words
+    the converter could not be sure of.
+    """
+    if os.environ.get("PDF_TOOL_PAGE_CHECK", "1") == "0" or not record.blocks and record.faithful is None:
+        return record
+    try:
+        from core.page_check import score
+
+        result = score(page, record, number)
+    except Exception:
+        return record
+    how = "faithful" if record.faithful is not None else ("positioned" if record.frames else "flow")
+    if result.weak and how == "flow" and not was_faithful:
+        try:
+            other = _positioned(fallback, page, plumber_page, background_xrefs, furniture, schema, number, counts["retries"], options, "")
+            other_result = score(page, other, number)
+            if other_result.better_than(result):
+                counts["retries"].append(
+                    f"Page {number}: the flowing reading kept {result.recall:.0%} of the page's words; "
+                    f"the positioned reading keeps {other_result.recall:.0%} and is used."
+                )
+                record, result, how = other, other_result, "positioned"
+        except Exception:
+            pass
+    counts.setdefault("page_checks", []).append({
+        "page": number,
+        "layout": how,
+        "words": result.source,
+        "found": result.recall,
+        "not_doubled": result.precision,
+        "unsure": result.unsure,
+    })
+    if result.source >= 10 and (result.recall < 0.85 or result.unsure):
+        counts.setdefault("review", []).append(
+            f"Page {number}: {result.recall:.0%} of its words found"
+            + (f"; check: {' '.join(result.unsure[:5])}" if result.unsure else "")
+        )
+    return record
 
 
 def _collect_font_report(pages: list[WordPage], counts: dict) -> None:
@@ -6951,6 +7123,8 @@ def _write_word_build(build: WordBuild, output: Path, word, options) -> dict:
         "page_plans": list(build.counts.get("page_plans") or []),
         "decision_log": list(build.counts.get("decision_log") or []),
         "missing_fonts": list(build.counts.get("missing_fonts") or []),
+        "page_checks": list(build.counts.get("page_checks") or []),
+        "review": list(build.counts.get("review") or []),
     }
     token = MERGE_PARAGRAPHS.set(bool(options.merge_paragraphs))
     direction_token = _DIRECTION.set(direction)

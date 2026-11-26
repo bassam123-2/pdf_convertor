@@ -390,6 +390,43 @@ def _overfull_token_ids(atoms: list[_Atom]) -> set[int]:
     return marked
 
 
+# Letters and signs that never sit inside an Arabic word: Latin letters,
+# Latin-1 signs and stray symbols a broken font map leaves behind.
+_FOREIGN_IN_ARABIC = re.compile(r"[A-Za-z\u00a1-\u00bf\u00c0-\u024f\u2022\u2122\\\[\]{}|^~`@#$&*_<>]")
+
+
+def _mixed_token_ids(atoms: list[_Atom]) -> set[int]:
+    """
+    Glyphs of Arabic words that carry a foreign letter or sign ("KŠيوما", "nي").
+
+    A font map that is only partly repaired leaves such words: most letters
+    read well, one or two stay Latin. The word is read again from the page
+    picture. An English word, a number or an Arabic word with ordinary
+    punctuation is not touched.
+    """
+    from core.docx_converter import _cluster_baselines
+
+    found: set[int] = set()
+    for band in _cluster_baselines(atoms):
+        ordered = sorted(band, key=lambda atom: (atom.x0, atom.origin_x))
+        token: list[_Atom] = []
+        for atom in ordered + [None]:
+            gap = atom is not None and token and atom.x0 - token[-1].x1 > max(1.5, atom.size * 0.25)
+            if atom is not None and atom.text.strip() and not gap:
+                token.append(atom)
+                continue
+            if token:
+                text = "".join(item.text for item in token)
+                arabic_fonts = {item.font for item in token if any(_is_arabic(char) for char in item.text)}
+                # The foreign letter must come from the Arabic letters' own
+                # font: a bullet from another font beside a word is a bullet.
+                foreign = [item for item in token if _FOREIGN_IN_ARABIC.search(item.text) and item.font in arabic_fonts]
+                if arabic_fonts and foreign and len(text) <= 24:
+                    found.update(id(item) for item in token)
+            token = [atom] if atom is not None and atom.text.strip() else []
+    return found
+
+
 def _suspect_atoms(page: fitz.Page, atoms: list[_Atom]) -> set[int]:
     """
     Glyphs whose letters cannot be trusted, by font.
@@ -418,6 +455,7 @@ def _suspect_atoms(page: fitz.Page, atoms: list[_Atom]) -> set[int]:
         if _overfull_arabic(atom):
             suspects.add(id(atom))
     suspects |= _overfull_token_ids(atoms)
+    suspects |= _mixed_token_ids(atoms)
     bad_fonts = {font for font, count in holes.items() if count >= 3 and count >= totals.get(font, 0) * 0.1}
     try:
         broken = _encoding_broken(page, atoms)
@@ -547,10 +585,43 @@ def _spacer_atom(host: _Atom, x0: float, x1: float, baseline: float) -> _Atom:
     )
 
 
+def _ocr_words_for(page: fitz.Page, atoms: list[_Atom], suspects: set[int]) -> list[_Atom]:
+    """
+    Words read from the page picture where the suspect glyphs are.
+
+    A few suspect words are read from strips around their lines, which is
+    quicker and reads small type larger. When suspects cover much of the
+    page, the whole page is read once.
+    """
+    from core.docx_converter import _ocr_word_atoms
+
+    boxes = []
+    for atom in atoms:
+        if id(atom) in suspects:
+            boxes.append(fitz.Rect(page.rect.x0, atom.y0 - 3, page.rect.x1, atom.y1 + 3))
+    if not boxes:
+        return []
+    boxes.sort(key=lambda box: box.y0)
+    strips: list[fitz.Rect] = []
+    for box in boxes:
+        if strips and box.y0 <= strips[-1].y1 + 4:
+            strips[-1] |= box
+        else:
+            strips.append(fitz.Rect(box))
+    covered = sum(strip.height for strip in strips)
+    if covered > page.rect.height * 0.35 or len(strips) > 12:
+        return _ocr_word_atoms(page)
+    words: list[_Atom] = []
+    for strip in strips:
+        words.extend(_ocr_word_atoms(page, strip))
+    return words
+
+
 def _replace_unreadable(
     bands: list[list[_Atom]],
     suspects: set[int],
     words: list[_Atom],
+    keep_unread: bool = False,
 ) -> tuple[list[list[_Atom]], list[_Atom], list[_Atom], int]:
     """
     Swap the untrusted glyphs for the words the picture reader found there.
@@ -621,6 +692,11 @@ def _replace_unreadable(
                 and left - 1.5 <= (word.x0 + word.x1) / 2.0 <= right + 1.5
                 and top - slack <= (word.y0 + word.y1) / 2.0 <= bottom + slack
             ]
+            if not found and keep_unread:
+                # No page picture behind the text: the PDF's own letters are
+                # better than a hole.
+                line.extend(zone)
+                continue
             if not found:
                 kept.extend(letters)
                 # Spacer stops اخقي + الأخلاقية from becoming one token.
@@ -1058,6 +1134,62 @@ def picture_page(page: fitz.Page, note: str = "") -> FaithfulPage:
     return payload
 
 
+@dataclass
+class PageReading:
+    """A page's glyphs once: doubles removed, untrusted words read from the picture."""
+
+    atoms: list
+    bands: list
+    replaced: list
+    kept: list
+    suspects: set
+    read: int = 0
+    removed: int = 0
+
+    @property
+    def letters(self) -> list:
+        """Every glyph the readers should use, the picture's words included."""
+        return [atom for band in self.bands for atom in band]
+
+
+_READINGS: dict[tuple, PageReading] = {}
+
+
+def page_reading(page: fitz.Page, keep_unread: bool = True) -> PageReading:
+    """
+    The page's trusted glyphs, shared by the line reader and the table readers.
+
+    Reading the picture is slow, so one page is read once; a table cell then
+    gets the same repaired words as the paragraph around it.
+    """
+    from core.docx_converter import _atoms_on_page, _cluster_baselines, _separate_overlapping_atoms
+
+    key = (id(page.parent), getattr(page.parent, "name", ""), page.number, keep_unread)
+    cached = _READINGS.get(key)
+    if cached is not None:
+        return cached
+    atoms = _atoms_on_page(page, upright_only=True)
+    before = sum(1 for atom in atoms if atom.text.strip())
+    atoms = _separate_overlapping_atoms(_dedupe_fake_bold(atoms))
+    removed = before - sum(1 for atom in atoms if atom.text.strip())
+    suspects = _suspect_atoms(page, atoms) if atoms else set()
+    bands = _cluster_baselines(atoms)
+    replaced: list = []
+    kept: list = []
+    read = 0
+    if suspects:
+        try:
+            words = _ocr_words_for(page, atoms, suspects)
+        except Exception:
+            words = []
+        bands, replaced, kept, read = _replace_unreadable(bands, suspects, words, keep_unread=keep_unread)
+    reading = PageReading(atoms, bands, replaced, kept, suspects, read, removed)
+    if len(_READINGS) > 16:
+        _READINGS.clear()
+    _READINGS[key] = reading
+    return reading
+
+
 def read_page(page: fitz.Page, repair: str = "", background: bool = True) -> FaithfulPage:
     """
     Read one PDF page into a background picture and text lines.
@@ -1065,35 +1197,19 @@ def read_page(page: fitz.Page, repair: str = "", background: bool = True) -> Fai
     `repair="rtl"` also drops a glyph that sits inside another glyph and
     repeats its letters, as the flowing mode's repair pass does.
     """
-    from core.docx_converter import (
-        _atoms_on_page,
-        _cluster_baselines,
-        _ocr_word_atoms,
-        _separate_overlapping_atoms,
-    )
-
     payload = FaithfulPage(float(page.rect.width), float(page.rect.height))
     number = page.number + 1
-    atoms = _atoms_on_page(page, upright_only=True)
-    # Drop overlapping identical draws (fake bold) and nested repeats.
-    before = sum(1 for atom in atoms if atom.text.strip())
-    atoms = _dedupe_fake_bold(atoms)
-    atoms = _separate_overlapping_atoms(atoms)
-    removed = before - sum(1 for atom in atoms if atom.text.strip())
-    if removed:
+    reading = page_reading(page, keep_unread=not background)
+    atoms = reading.atoms
+    if reading.removed:
         payload.notes.append(
-            f"Page {number}: removed {removed} overlapping duplicate glyph(s) (fake bold / overprint)."
+            f"Page {number}: removed {reading.removed} overlapping duplicate glyph(s) (fake bold / overprint)."
         )
-    suspects = _suspect_atoms(page, atoms) if atoms else set()
-    bands = _cluster_baselines(atoms)
-    replaced: list[_Atom] = []
-    kept: list[_Atom] = []
-    if suspects:
-        try:
-            words = _ocr_word_atoms(page)
-        except Exception:
-            words = []
-        bands, replaced, kept, payload.read_from_picture = _replace_unreadable(bands, suspects, words)
+    bands = reading.bands
+    replaced = reading.replaced
+    kept = reading.kept
+    if reading.suspects:
+        payload.read_from_picture = reading.read
         payload.kept_in_picture = len(kept)
         if payload.read_from_picture:
             payload.notes.append(

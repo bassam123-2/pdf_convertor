@@ -1188,6 +1188,14 @@ def _show_word_result() -> None:
     retries = list(counts.get("retries") or [])
     if retries:
         st.info("أُعيدت قراءة بعض الصفحات قبل الحفظ:\n\n" + "\n".join(f"• {item}" for item in retries))
+    review = list(counts.get("review") or [])
+    if review:
+        # Pages whose words the converter could not all match with the PDF.
+        lines = []
+        for item in review:
+            item = item.replace("Page ", "صفحة ").replace(" of its words found", " من كلماتها وُجدت").replace("check:", "راجع:")
+            lines.append(f"• {item}")
+        st.warning("صفحات يُستحسن مراجعتها (قد تكون فيها كلمات غير دقيقة):\n\n" + "\n".join(lines))
     _word_page_tools(result)
     _word_similarity_preview(result)
     st.download_button(

@@ -448,3 +448,47 @@ def test_cards_side_by_side_become_one_table_row(tmp_path):
     tables = [b for page in build.pages for b in page.blocks if type(b).__name__ == "TableBlock"]
     assert len(tables) == 1 and len(tables[0].rows) == 1 and len(tables[0].rows[0]) == 3
     assert tables[0].rows[0][0].startswith("card0 line0")
+
+
+# --- words a broken font map left half Latin; symbol-font bullets; page check ---
+
+
+def test_arabic_word_with_a_latin_letter_from_its_own_font_is_suspect():
+    from core.arabic_fixer import _Atom
+    from core.faithful import _mixed_token_ids
+
+    def atom(text, x, font="Majalla"):
+        return _Atom(text, x, 90, x + 5, 102, x, 100, 1, 12.0, False, "", font)
+
+    garbled = [atom("n", 10), atom("ي", 15)]
+    bullet = [atom("ü", 40, "Wingdings"), atom("ت", 45), atom("م", 50)]
+    english = [atom("A", 80), atom("I", 85)]
+    found = _mixed_token_ids(garbled + bullet + english)
+    assert {id(a) for a in garbled} <= found
+    assert not ({id(a) for a in bullet} & found)
+    assert not ({id(a) for a in english} & found)
+
+
+def test_symbol_font_letters_become_their_signs():
+    from core.docx_converter import _symbol_char
+
+    assert _symbol_char("ü", "Wingdings-Regular") == "✓"
+    assert _symbol_char("§", "Wingdings") == "▪"
+    assert _symbol_char("", "SymbolMT") == "•"
+    assert _symbol_char("ü", "Calibri") == "ü"
+
+
+def test_page_check_reports_kept_and_doubled_words(tmp_path):
+    from core.page_check import score
+
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((60, 200), "alpha bravo charlie delta echo foxtrot golf hotel india juliet", fontsize=11)
+    page.insert_text((60, 220), "kilo lima mike november oscar papa quebec romeo sierra tango", fontsize=11)
+    page.insert_text((60, 240), "uniform victor whiskey xray yankee zulu one two three four", fontsize=11)
+    good = type("R", (), {"blocks": [TextBlock("paragraph", (0, 0, 1, 1), page.get_text())], "faithful": None})()
+    half = type("R", (), {"blocks": [TextBlock("paragraph", (0, 0, 1, 1), page.get_text()[:60])], "faithful": None})()
+    twice = type("R", (), {"blocks": [TextBlock("paragraph", (0, 0, 1, 1), page.get_text() * 2)], "faithful": None})()
+    assert score(page, good, 1).recall == 1.0 and not score(page, good, 1).weak
+    assert score(page, half, 1).weak
+    assert score(page, twice, 1).weak

@@ -147,11 +147,17 @@ def page_words(page: fitz.Page) -> tuple[list[str], int]:
         if any(abs(r.x0 - rect.x0) < 2.5 and abs(r.y0 - rect.y0) < 2.5 for r in spots.get(word, [])):
             continue
         spots.setdefault(word, []).append(rect)
-        if not _READABLE.match(word):
+        if not _READABLE.match(word) or _mixed_script(word):
+            # Latin letters inside an Arabic word: the font map is broken
+            # there, and the PDF does not say which letters were meant.
             unreadable += 1
             continue
         kept.append(word)
     return kept, unreadable
+
+
+def _mixed_script(word: str) -> bool:
+    return bool(_ARABIC.search(word)) and bool(re.search(r"[A-Za-z\u00C0-\u024F]", word))
 
 
 def _trace_words(page: fitz.Page) -> list[tuple[str, fitz.Rect]]:
@@ -215,7 +221,9 @@ def _trace_words(page: fitz.Page) -> list[tuple[str, fitz.Rect]]:
     for unit in every:
         middle = (unit[1].y0 + unit[1].y1) / 2
         if lines:
-            last = lines[-1][-1]
+            # Against the line's first glyph, not its last: side-by-side
+            # boxes with lines a few points apart must not chain together.
+            last = lines[-1][0]
             if abs(middle - (last[1].y0 + last[1].y1) / 2) <= max(unit[2], last[2]) * 0.5:
                 lines[-1].append(unit)
                 continue
@@ -490,7 +498,15 @@ def _check_printed_pages(pdf: fitz.Document, printed: fitz.Document, report: Qua
         ))
         return
     source_bag = _bag(source_words)
-    result_bag = _bag([w for page in printed for w in page_words(page)[0]])
+    result_words = [w for page in printed for w in page_words(page)[0]]
+    result_bag = _bag(result_words)
+    # Garbled words left in Word: Arabic with Latin letters inside.
+    mixed = 0
+    for page in printed:
+        for text, _rect in _trace_words(page):
+            if _mixed_script(normalize_word(text) or ""):
+                mixed += 1
+    report.measures["mixed_script_words"] = mixed
     report.measures["source_unreadable_words"] = unreadable
     common = sum((source_bag & result_bag).values())
     recall = common / (sum(source_bag.values()) or 1)

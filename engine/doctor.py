@@ -90,6 +90,8 @@ def explain(pdf: str, pages: str) -> list[str]:
         lines.append(f"page {page.number}: {how} ({page.kind}) {kinds}")
     for note in build.counts.get("retries", []):
         lines.append(f"  note: {note}")
+    for note in build.counts.get("review", []):
+        lines.append(f"  review: {note}")
     return lines
 
 
