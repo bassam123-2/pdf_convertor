@@ -273,3 +273,24 @@ def test_coloured_cell_table_is_a_table_in_both_readers(tmp_path):
     with zipfile.ZipFile(out) as package:
         xml = package.read("word/document.xml").decode("utf-8")
     assert "<w:tbl>" in xml and "Authority" in xml
+
+
+EXTRACT = FILES / "guide_extract_7p.pdf"
+
+
+@pytest.mark.skipif(not EXTRACT.is_file(), reason="sample missing")
+def test_glyphs_drawn_as_shapes_are_not_colour_bars():
+    from core.docx_converter import _drawing_paints
+
+    document = fitz.open(EXTRACT)
+    for page in document:
+        assert "000000" not in {paint[4] for paint in _drawing_paints(page)}
+
+
+def test_a_box_is_a_rectangle_not_a_letter():
+    from core.table_rebuild import is_box
+
+    rect = fitz.Rect(0, 0, 100, 20)
+    assert is_box({"items": [("re", rect, 1)], "rect": rect})
+    letter = [("l", fitz.Point(0, 0), fitz.Point(1, 1))] * 9 + [("c", 0, 0, 0, 0)] * 6
+    assert not is_box({"items": letter, "rect": fitz.Rect(0, 0, 8, 10)})

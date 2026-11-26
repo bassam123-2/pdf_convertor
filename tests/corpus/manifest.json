@@ -258,6 +258,19 @@
       "mode": "editable",
       "min_similarity": 0.5,
       "notes": "Shape repair once read its sound English text with the wrong subset (The -> Rhe)."
+    },
+    {
+      "id": "guide_extract_7p",
+      "file": "files/guide_extract_7p.pdf",
+      "producer": "Microsoft: Print To PDF",
+      "language": "ar",
+      "structure": ["contents", "coloured definitions table", "coloured 5-column table"],
+      "graphics": ["logos", "banners"],
+      "font_issues": ["no text layer: every glyph is a vector drawing"],
+      "orientation": "portrait",
+      "mode": "editable",
+      "min_similarity": 0.5,
+      "notes": "Glyph drawings were read as black bars behind the OCR text; its tables are read from the page picture."
     }
   ],
   "missing_categories": [

@@ -326,7 +326,7 @@ def _filled_boxes(page: fitz.Page) -> list[tuple[fitz.Rect, tuple]]:
     for drawing in drawings:
         fill = drawing.get("fill")
         rect = drawing.get("rect")
-        if not fill or rect is None:
+        if not fill or rect is None or not is_box(drawing):
             continue
         if all(channel >= 0.94 for channel in fill[:3]):
             continue  # white paper
@@ -877,6 +877,30 @@ def _reread_cells(page: fitz.Page, bbox: tuple, rows: list[list[str]], widths: l
             cells.append(text or old)
         fresh.append(cells)
     return fresh
+
+
+def is_box(drawing: dict) -> bool:
+    """
+    True when a drawing is a plain box (a cell, a bar, a banner).
+
+    A box is drawn as one rectangle, a rounded rectangle or a few straight
+    lines. A letter turned into a drawing ("Print to PDF" does that to every
+    glyph) is a run of many lines and curves, and must never be read as a
+    coloured bar behind the text.
+    """
+    items = drawing.get("items") or []
+    if not items:
+        return False
+    kinds = [item[0] for item in items]
+    if all(kind in {"re", "qu"} for kind in kinds):
+        return len(items) <= 4
+    if all(kind == "l" for kind in kinds) and len(items) <= 6:
+        return True
+    # A rounded rectangle: four sides and four corner curves.
+    if set(kinds) <= {"l", "c"} and len(items) <= 10 and kinds.count("c") <= 4:
+        rect = drawing.get("rect")
+        return rect is not None and rect.width >= 12 and rect.height >= 8
+    return False
 
 
 def visible_drawings(page: fitz.Page) -> list[dict]:

@@ -187,6 +187,12 @@ def read_table(page: fitz.Page, bbox: tuple[float, float, float, float]) -> Imag
             again = _reader(single)
             if again is not None:
                 tables = _extract(TableImage, path, again) or tables
+        if not tables:
+            # img2table's own reading can drop an Arabic table entirely. Its
+            # grid is found without OCR, and each cell is read on its own.
+            tables = _extract(TableImage, path, None)
+            if tables:
+                _read_cells_one_by_one(path, tables)
     if not tables:
         return None
     # The largest grid is the table; it must fill most of the picture.
@@ -238,6 +244,61 @@ def read_table(page: fitz.Page, bbox: tuple[float, float, float, float]) -> Imag
     return ImageTable(rows, widths, heights, box, [f"table read from its picture at {DPI} dpi (img2table + Tesseract)"])
 
 
+def _tesseract_text(image_path: str, langs: str) -> str:
+    import subprocess
+
+    from engine.tesseract_bin import find_exe
+
+    exe = find_exe()
+    tessdata, _all = tessdata_for()
+    if not exe or not tessdata:
+        return ""
+    env = dict(os.environ, TESSDATA_PREFIX=tessdata)
+    try:
+        done = subprocess.run(
+            [exe, image_path, "stdout", "-l", langs, "--psm", "6"],
+            capture_output=True, text=True, encoding="utf-8", env=env, timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        return ""
+    return (done.stdout or "").strip()
+
+
+def _read_cells_one_by_one(path: str, tables: list) -> None:
+    """Read every cell of img2table's grids with Tesseract, in the table's own script."""
+    import re
+
+    from PIL import Image
+
+    _tessdata, available_langs = tessdata_for()
+    have = set(available_langs.split("+"))
+    picture = Image.open(path)
+    with tempfile.TemporaryDirectory(prefix="pdf_tool_cell_") as work:
+        sample = _tesseract_text(path, "+".join(lang for lang in ("ara", "eng") if lang in have))
+        arabic = len(re.findall(r"[\u0621-\u064A]", sample))
+        latin = len(re.findall(r"[A-Za-z]", sample))
+        langs = "ara" if arabic > latin and "ara" in have else ("eng" if latin > arabic * 3 and "eng" in have else available_langs)
+        done: dict[tuple, str] = {}
+        for table in tables:
+            for row in table.content.values():
+                for cell in row:
+                    key = (cell.bbox.x1, cell.bbox.y1, cell.bbox.x2, cell.bbox.y2)
+                    if key not in done:
+                        pad = 4
+                        crop = picture.crop((max(0, key[0] + pad), max(0, key[1] + pad), key[2] - pad, key[3] - pad))
+                        if crop.width < 8 or crop.height < 8:
+                            done[key] = ""
+                        else:
+                            target = os.path.join(work, f"c{len(done)}.png")
+                            crop.save(target)
+                            done[key] = _tesseract_text(target, langs)
+                    try:
+                        cell.value = done[key]
+                    except Exception:
+                        object.__setattr__(cell, "value", done[key])
+
+
 def _extract(TableImage, path: str, reader) -> list:
     try:
         return TableImage(path).extract_tables(
@@ -270,3 +331,37 @@ def _edges(values: list[float]) -> list[float]:
         if not out or value - out[-1] > 4:
             out.append(float(value))
     return out
+
+
+def tables_on_page(page: fitz.Page, dpi: int = 110) -> list[tuple[float, float, float, float]]:
+    """
+    Boxes (PDF points) of ruled tables seen in a picture of the whole page.
+
+    For pages whose text and rules are only drawings or pixels (a "Print to
+    PDF" page, a scan), where no text layer tells a table finder anything.
+    """
+    try:
+        from img2table.document import Image as TableImage
+    except Exception:
+        return []
+    if _ocr() is None:
+        return []
+    try:
+        pixmap = page.get_pixmap(dpi=dpi, alpha=False)
+    except Exception:
+        return []
+    scale = 72.0 / dpi
+    with tempfile.TemporaryDirectory(prefix="pdf_tool_page_") as work:
+        path = os.path.join(work, "page.png")
+        pixmap.save(path)
+        found = _extract(TableImage, path, None)
+    boxes = []
+    for table in found:
+        rows = list(table.content.values())
+        if len(rows) < 2 or max((len(row) for row in rows), default=0) < 2:
+            continue
+        box = (table.bbox.x1 * scale, table.bbox.y1 * scale, table.bbox.x2 * scale, table.bbox.y2 * scale)
+        if (box[2] - box[0]) < 60 or (box[3] - box[1]) < 30:
+            continue
+        boxes.append(box)
+    return boxes

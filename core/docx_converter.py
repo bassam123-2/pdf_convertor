@@ -692,10 +692,12 @@ def _drawing_paints(page: fitz.Page) -> list[tuple]:
         drawings = visible_drawings(page)
     except Exception:
         return paints
+    from core.table_rebuild import is_box
+
     for drawing in drawings:
         fill = drawing.get("fill")
         rect = drawing.get("rect")
-        if not fill or rect is None:
+        if not fill or rect is None or not is_box(drawing):
             continue
         try:
             red, green, blue = (int(round(float(channel) * 255)) for channel in list(fill)[:3])
@@ -706,6 +708,10 @@ def _drawing_paints(page: fitz.Page) -> list[tuple]:
         area = max(0.0, float(rect.x1) - float(rect.x0)) * max(0.0, float(rect.y1) - float(rect.y0))
         if area < 20:
             continue
+        if min(float(rect.width), float(rect.height)) < 3.0:
+            continue  # a rule or a cell border, not a bar behind text
+        if float(rect.width) < 14.0 or area < 200:
+            continue  # a stroke of a letter drawn as a box, not a bar
         paints.append(
             (
                 float(rect.x0),
@@ -3150,6 +3156,9 @@ def extract_page(
         tables = _without_figure_tables(tables, figures)
         if reading == "digital":
             tables += _coloured_tables(page, tables)
+        else:
+            # Text read from the page picture: tables are read from it too.
+            tables += _picture_tables(page, tables)
     if mode == "blocks":
         paragraphs = _paragraphs_from_regions(page, atoms, tables, figures)
     else:
@@ -3165,6 +3174,30 @@ def extract_page(
     flow.extend(pending)
     _strip_stamps(flow)
     return _group_with_containers(page, flow)
+
+
+def _picture_tables(page: fitz.Page, found: list) -> list:
+    """Ruled tables on a page with no usable text layer, read cell by cell."""
+    try:
+        from core import image_tables
+    except Exception:
+        return []
+    extra = []
+    try:
+        boxes = image_tables.tables_on_page(page)
+    except Exception:
+        return []
+    for box in boxes:
+        if any(_overlap_ratio(box, other.bbox) > 0.3 for other in found):
+            continue
+        try:
+            table = image_tables.read_table(page, box)
+        except Exception:
+            table = None
+        if table is None:
+            continue
+        extra.append(TableBlock(bbox=table.bbox, rows=table.rows, widths=table.widths, rules=True))
+    return extra
 
 
 def _coloured_tables(page: fitz.Page, found: list) -> list:
