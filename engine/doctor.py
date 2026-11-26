@@ -75,9 +75,32 @@ def report() -> list[str]:
     return lines
 
 
+def explain(pdf: str, pages: str) -> list[str]:
+    """How the editable reader takes each page, and why."""
+    from core.docx_converter import WordOptions, read_word_build
+
+    build = read_word_build(pdf, options=WordOptions(mode="editable", fit_a4=True, direction="auto", page_spec=pages))
+    lines = []
+    for page in build.pages:
+        kinds: dict[str, int] = {}
+        for block in page.blocks:
+            name = type(block).__name__
+            kinds[name] = kinds.get(name, 0) + 1
+        how = "faithful" if page.faithful is not None else ("positioned" if page.frames else "flow")
+        lines.append(f"page {page.number}: {how} ({page.kind}) {kinds}")
+    for note in build.counts.get("retries", []):
+        lines.append(f"  note: {note}")
+    return lines
+
+
 def main() -> int:
     for line in report():
         print(line)
+    # python -m engine.doctor file.pdf 4   (or 3-5)
+    if len(sys.argv) >= 3:
+        print()
+        for line in explain(sys.argv[1], sys.argv[2]):
+            print(line)
     return 0
 
 

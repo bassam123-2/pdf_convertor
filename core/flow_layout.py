@@ -509,9 +509,82 @@ def blocks_from_faithful(page, payload) -> list:
             except Exception:
                 continue
         blocks.append(ImageBlock((rect.x0, rect.y0, rect.x1, rect.y1), data, rect.width, rect.height, "center"))
+    blocks = _vector_figures(page, blocks)
     _line_pitch(blocks)
     _set_alignment(blocks, float(page.rect.width))
     return blocks
+
+
+def _vector_figures(page, blocks: list) -> list:
+    """
+    Keep a drawn infographic (coloured shapes with white words in them) as
+    one picture, as printed.
+
+    The flow writes no vector shapes, so words printed on coloured shapes
+    would come out as loose coloured bars. Several light-coloured lines on
+    a dark ground that sit inside large filled shapes make a figure: the
+    region of those shapes is drawn as a picture, words and all, and its
+    lines leave the flow. A single title on one bar stays a banner.
+    """
+    import fitz
+
+    from core.docx_converter import ImageBlock
+    from core.table_rebuild import visible_drawings
+
+    on_colour = [b for b in blocks if _kind(b) == "text" and getattr(b, "fill", "") and _light(getattr(b, "color", "") or "FFFFFF")]
+    if len(on_colour) < 3:
+        return blocks
+    shapes = []
+    for drawing in visible_drawings(page):
+        rect = drawing.get("rect")
+        fill = drawing.get("fill")
+        if rect is None or not fill or all(c >= 0.94 for c in fill[:3]):
+            continue
+        if rect.width * rect.height < 800 or rect.width > page.rect.width * 0.9:
+            continue
+        shapes.append(fitz.Rect(rect))
+    figures: list = []
+    for block in on_colour:
+        box = fitz.Rect(_box(block))
+        hosts = [shape for shape in shapes if shape.intersects(box)]
+        if not hosts:
+            continue
+        area = fitz.Rect(hosts[0])
+        for shape in hosts[1:]:
+            area |= shape
+        figures.append(area)
+    # Shapes side by side on one row (the steps of an infographic) are one
+    # figure: areas that share most of their height are joined.
+    merged = True
+    while merged:
+        merged = False
+        for i in range(len(figures)):
+            for j in range(i + 1, len(figures)):
+                a, b = figures[i], figures[j]
+                shared = min(a.y1, b.y1) - max(a.y0, b.y0)
+                if a.intersects(b) or shared >= min(a.height, b.height) * 0.5:
+                    figures[i] = a | b
+                    del figures[j]
+                    merged = True
+                    break
+            if merged:
+                break
+    kept = list(blocks)
+    for figure in figures:
+        inside = [b for b in kept if _kind(b) == "text" and figure.contains(fitz.Point((_box(b)[0] + _box(b)[2]) / 2, (_box(b)[1] + _box(b)[3]) / 2))]
+        if len(inside) < 3 or figure.height < 40:
+            continue  # a banner, not a figure
+        # Shapes that touch each other on one row belong to one figure.
+        for shape in shapes:
+            if shape.intersects(figure + (-6, -6, 6, 6)):
+                figure |= shape
+        try:
+            data = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5), clip=figure & page.rect, alpha=False).tobytes("png")
+        except Exception:
+            continue
+        kept = [b for b in kept if b not in inside]
+        kept.append(ImageBlock((figure.x0, figure.y0, figure.x1, figure.y1), data, figure.width, figure.height, "center"))
+    return kept
 
 
 def _line_pitch(blocks: list) -> None:
@@ -715,13 +788,34 @@ def _other_glyphs(page) -> int:
         traces = page.get_texttrace() or []
     except Exception:
         return 0
+    filled = _filled_spots(traces)
     for trace in traces:
         kind = int(trace.get("type") or 0)
         if kind == 3:
             continue
+        if kind == 1 and _outline_copy(trace, filled):
+            continue  # an outline drawn over the same filled text
         if kind != 0 or not _upright(trace):
             count += sum(1 for raw in trace.get("chars") or [] if chr(int(raw[0])).strip())
     return count
+
+
+def _filled_spots(traces) -> set:
+    spots = set()
+    for trace in traces:
+        if int(trace.get("type") or 0) == 0:
+            for raw in trace.get("chars") or []:
+                spots.add((raw[0], round(raw[2][0]), round(raw[2][1])))
+    return spots
+
+
+def _outline_copy(trace, filled: set) -> bool:
+    """True when a stroked trace repeats filled glyphs at the same spots."""
+    chars = [raw for raw in trace.get("chars") or [] if chr(int(raw[0])).strip()]
+    if not chars:
+        return True
+    same = sum(1 for raw in chars if (raw[0], round(raw[2][0]), round(raw[2][1])) in filled)
+    return same >= len(chars) * 0.8
 
 
 def page_flows_well(page, payload) -> tuple[bool, str]:

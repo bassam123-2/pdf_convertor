@@ -886,10 +886,15 @@ def _other_text(page: fitz.Page) -> bool:
         traces = page.get_texttrace() or []
     except Exception:
         return False
+    from core.flow_layout import _filled_spots, _outline_copy
+
+    filled = _filled_spots(traces)
     for trace in traces:
         kind = int(trace.get("type") or 0)
         if kind == 3:
             continue
+        if kind == 1 and _outline_copy(trace, filled):
+            continue  # an outline over the same filled text, not text of its own
         if kind != 0 or not _upright(trace):
             if any(chr(int(raw[0])).strip() for raw in trace.get("chars") or []):
                 return True

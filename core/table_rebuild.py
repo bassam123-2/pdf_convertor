@@ -234,6 +234,11 @@ def classify_regions(page: fitz.Page) -> list[ImageRegion]:
         if any(r.kind == "vector_table" and _overlap_ratio(bbox, r.bbox) > 0.5 for r in regions):
             continue
         xref = int(info.get("xref") or 0) or None
+        if int(info.get("width") or 99) <= 4 or int(info.get("height") or 99) <= 4:
+            # One pixel row or column stretched over the page: a gradient or
+            # a tint, never a chart or a table.
+            regions.append(ImageRegion("other", bbox, "stretched pixels (decoration)", xref, b""))
+            continue
         if is_decoration(page, bbox):
             # Corner ornaments and backdrops are never tables or charts.
             regions.append(ImageRegion("other", bbox, "page decoration", xref, b""))
