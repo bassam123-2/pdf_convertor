@@ -3,3 +3,4 @@ __pycache__/
 tests/corpus/_quality/
 .extract_cache/
 output_preview/
+outputs/
