@@ -17,7 +17,7 @@ from engine.version import VERSION
 
 
 def test_version_is_set():
-    assert VERSION == "1.0.0"
+    assert VERSION == "1.1.0"
 
 
 def test_workers_follow_cpu_and_mode(monkeypatch):
@@ -112,5 +112,38 @@ def test_tessdata_prefix_is_the_data_folder(tmp_path, monkeypatch):
 def test_installer_script_keeps_the_same_version():
     text = Path("packaging/PDFTool.iss").read_text(encoding="utf-8")
     assert f'#define AppVersion "{VERSION}"' in text
-    assert "محوّل PDF" in text
+    assert '#define AppName "PDF Converter"' in text
     assert "{localappdata}" in text
+    # The same AppId as earlier builds, so a new installer replaces them.
+    assert "B7E4C2A1-6D58-4F0A-9C31-2A6E8B4D91F0" in text
+
+
+def test_selftest_passes_from_source(tmp_path):
+    # The same checks the packaged app runs before an installer is made.
+    from engine.tesseract_bin import find_exe
+
+    if not find_exe():
+        pytest.skip("Tesseract is not installed")
+    import json
+
+    from engine.selftest import run
+
+    report = tmp_path / "selftest.json"
+    code = run(str(report))
+    results = json.loads(report.read_text(encoding="utf-8"))["results"]
+    assert code == 0, [item for item in results if not item["ok"]]
+
+
+def test_launcher_finds_its_files():
+    import importlib.util
+
+    root = Path(__file__).resolve().parent.parent
+    from importlib.machinery import SourceFileLoader
+
+    loader = SourceFileLoader("desktop_app", str(root / "desktop_app.pyw"))
+    spec = importlib.util.spec_from_loader("desktop_app", loader)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert (module.BUNDLE / "app.py").is_file()
+    assert (module.BUNDLE / "packaging" / "icon.png").is_file()
+    assert module._server_command(8600)[-2:] == ["--serve", "8600"]

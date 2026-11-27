@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 0, 0),
-    prodvers=(1, 0, 0, 0),
+    filevers=(1, 1, 0, 0),
+    prodvers=(1, 1, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -14,13 +14,13 @@ VSVersionInfo(
       StringTable(
         "040904B0",
         [
-          StringStruct("CompanyName", "PDF Tool"),
-          StringStruct("FileDescription", "PDF Tool"),
-          StringStruct("FileVersion", "1.0.0"),
-          StringStruct("InternalName", "PDFTool"),
-          StringStruct("OriginalFilename", "PDF Tool.exe"),
-          StringStruct("ProductName", "PDF Tool"),
-          StringStruct("ProductVersion", "1.0.0"),
+          StringStruct("CompanyName", "PDF Converter"),
+          StringStruct("FileDescription", "PDF Converter"),
+          StringStruct("FileVersion", "1.1.0"),
+          StringStruct("InternalName", "PDFConverter"),
+          StringStruct("OriginalFilename", "PDF Converter.exe"),
+          StringStruct("ProductName", "PDF Converter"),
+          StringStruct("ProductVersion", "1.1.0"),
         ],
       )
     ]),

@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
+# The data folder under %LOCALAPPDATA%. It keeps its first name so an update
+# finds the settings and the learned corrections of the earlier version.
 APP_NAME = "PDFTool"
-WINDOW_TITLE = "محوّل PDF"
+PRODUCT_NAME = "PDF Converter"
+WINDOW_TITLE = "PDF Converter"

@@ -1,0 +1,96 @@
+# Build the Windows installer on every change to the tool.
+#
+# The packaged app runs its own self test (every module, Tesseract with
+# Arabic, a real PDF to Word conversion) before the installer is made. The
+# installer is attached to the run and published on the "windows-latest"
+# release, so the newest build is always at the same download link.
+name: Windows app
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app.py"
+      - "desktop_app.pyw"
+      - "core/**"
+      - "engine/**"
+      - "utils/**"
+      - "tessdata/**"
+      - "packaging/**"
+      - "PDFTool.spec"
+      - "requirements.txt"
+      - ".streamlit/**"
+      - ".github/workflows/windows-app.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-app
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Install Tesseract and Inno Setup
+        run: |
+          choco install tesseract --no-progress -y
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup --no-progress -y }
+          & "C:\Program Files\Tesseract-OCR\tesseract.exe" --version
+
+      - name: Version
+        id: version
+        run: |
+          $v = python -c "from engine.version import VERSION; print(VERSION)"
+          "value=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Package the app
+        run: python -m PyInstaller PDFTool.spec --noconfirm --clean
+
+      - name: Self test of the packaged app
+        run: |
+          $p = Start-Process -FilePath "dist\PDF Converter\PDF Converter.exe" -ArgumentList "--selftest", "dist\selftest.json" -Wait -PassThru
+          Get-Content dist\selftest.json
+          if ($p.ExitCode -ne 0) { throw "Self test failed" }
+
+      - name: Make the installer
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { $iscc = "$env:ProgramFiles\Inno Setup 6\ISCC.exe" }
+          & $iscc "/DAppVersion=${{ steps.version.outputs.value }}" packaging\PDFTool.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PDFConverter-Setup-${{ steps.version.outputs.value }}
+          path: |
+            dist/PDFConverter-Setup-*.exe
+            dist/selftest.json
+
+      - name: Publish on the windows-latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: windows-latest
+          name: PDF Converter ${{ steps.version.outputs.value }} (latest build)
+          prerelease: true
+          make_latest: false
+          files: dist/PDFConverter-Setup-*.exe
+          body: |
+            Newest Windows build of PDF Converter, made from commit ${{ github.sha }}.
+            Download PDFConverter-Setup-${{ steps.version.outputs.value }}.exe and run it.
+            Windows may warn that the program is not signed: More info, then Run anyway.

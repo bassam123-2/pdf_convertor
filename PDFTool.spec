@@ -1,21 +1,34 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""One-folder package. Another Windows PC does not need Python or a Tesseract install."""
+"""
+PDF Converter for Windows: one folder that runs on a PC with no Python and
+no Tesseract installed.
 
+    pyinstaller PDFTool.spec --noconfirm
+
+Builds dist/PDF Converter/PDF Converter.exe. packaging/PDFTool.iss then
+turns that folder into one installer. packaging/build.bat runs both, and
+the "Windows app" workflow on GitHub does the same on every push.
+
+Tesseract is copied from its usual install folder on the build PC, with the
+English model from there and the Arabic model from tessdata/ in this repo.
+"""
+
+import os
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules, copy_metadata
 
 ROOT = Path(SPECPATH)
 VENDOR = ROOT / "vendor" / "tesseract"
-SYSTEM_TESS = Path(r"C:\Program Files\Tesseract-OCR")
+SYSTEM_TESS = Path(os.environ.get("TESSERACT_HOME", r"C:\Program Files\Tesseract-OCR"))
 
 
 def _stage_tesseract() -> None:
-    """Copy the local Tesseract program and the Arabic model into vendor/."""
+    """Copy the build PC's Tesseract program and the models into vendor/."""
     import shutil
 
     if not (SYSTEM_TESS / "tesseract.exe").is_file():
-        raise SystemExit("Install Tesseract once on this build PC so it can be copied into the app.")
+        raise SystemExit(f"Install Tesseract once on this build PC ({SYSTEM_TESS}) so it can be copied into the app.")
     tessdata = VENDOR / "tessdata"
     tessdata.mkdir(parents=True, exist_ok=True)
     shutil.copy2(SYSTEM_TESS / "tesseract.exe", VENDOR / "tesseract.exe")
@@ -25,14 +38,16 @@ def _stage_tesseract() -> None:
         source = SYSTEM_TESS / "tessdata" / name
         if source.is_file():
             shutil.copy2(source, tessdata / name)
-    # The plate re-read ends with the config name "tsv". Tesseract loads that
-    # from tessdata/configs. Traineddata alone makes the re-read return nothing.
+    # "tsv" output is a config file in tessdata/configs; without it the word
+    # boxes come back empty.
     for folder in ("configs", "tessconfigs"):
         source = SYSTEM_TESS / "tessdata" / folder
         if source.is_dir():
             shutil.copytree(source, tessdata / folder, dirs_exist_ok=True)
     if not (tessdata / "configs" / "tsv").is_file():
-        raise SystemExit("Tesseract tessdata/configs/tsv was not copied.")
+        shutil.copytree(ROOT / "tessdata" / "configs", tessdata / "configs", dirs_exist_ok=True)
+    if not (tessdata / "eng.traineddata").is_file():
+        raise SystemExit("eng.traineddata was not found in the Tesseract install.")
     ara = ROOT / "tessdata" / "ara.traineddata"
     if not ara.is_file():
         raise SystemExit("tessdata/ara.traineddata is missing.")
@@ -53,79 +68,51 @@ datas = [
     ("engine", "engine"),
     (".streamlit", ".streamlit"),
     ("tessdata", "tessdata"),
-    (str(VENDOR / "tessdata"), "tesseract/tessdata"),
+    ("packaging/icon.png", "packaging"),
+    ("packaging/icon.ico", "packaging"),
     ("packaging/UPDATE.txt", "."),
+    (str(VENDOR / "tessdata"), "tesseract/tessdata"),
 ]
 binaries = [(str(path), "tesseract") for path in VENDOR.glob("*.dll")]
 binaries.append((str(VENDOR / "tesseract.exe"), "tesseract"))
-hiddenimports = [
-    "engine",
-    "engine.host",
-    "engine.paths",
-    "engine.resources",
-    "engine.tesseract_bin",
-    "engine.ocr_status",
-    "engine.benchmark",
-    "engine.checkpoint",
-    "engine.offline",
-    "engine.version",
-    "excel_review",
-    "page_images",
-    "desktop_review",
-    "core",
-    "core.pdf_loader",
-    "core.arabic_fixer",
-    "core.docx_converter",
-    "core.layout_check",
-    "core.html_layout",
-    "core.excel_converter",
-    "utils",
-    "utils.file_manager",
-    "fitz",
-    "pdfplumber",
-    "pdfminer",
-    "pdfminer.high_level",
-    "docx",
-    "openpyxl",
-    "pandas",
-    "PIL",
-    "altair",
-    "pyarrow",
-    "streamlit",
-    "multiprocessing",
-    "winrt",
-    "winrt.windows.media.ocr",
-    "winrt.windows.graphics.imaging",
-    "winrt.windows.storage.streams",
-    "winrt.windows.globalization",
-    "winrt.windows.foundation",
-    "winrt.windows.foundation.collections",
-]
 
-datas += collect_data_files("streamlit")
-datas += collect_data_files("altair")
-binaries += collect_dynamic_libs("streamlit")
+# Modules the page imports only when a certain kind of PDF comes in (a
+# scan, a broken font, a table in a picture): named here, or the frozen app
+# would miss them on that page alone.
+hiddenimports = ["excel_review", "page_images", "desktop_review", "multiprocessing", "tkinter", "tkinter.ttk", "tkinter.messagebox"]
+for package in ("core", "engine", "utils"):
+    hiddenimports += collect_submodules(package)
+for package in ("fontTools", "img2table", "pdfplumber", "pdfminer", "docx", "openpyxl", "thefuzz", "rapidfuzz", "winrt"):
+    try:
+        hiddenimports += [name for name in collect_submodules(package) if ".tests" not in name]
+    except Exception:
+        pass
 hiddenimports += [
-    name
-    for name in collect_submodules("streamlit")
+    name for name in collect_submodules("streamlit")
     if ".tests" not in name and ".testing" not in name
 ]
-hiddenimports += [
-    name
-    for name in collect_submodules("winrt")
-    if ".tests" not in name
-]
+
+# Data files libraries read at run time: Word's blank template, the PDF
+# character maps, Streamlit's page, the fonts' metric tables.
+for package in ("streamlit", "altair", "docx", "pdfminer", "fontTools", "img2table", "openpyxl", "pypdfium2_raw"):
+    try:
+        datas += collect_data_files(package)
+    except Exception:
+        pass
+# python-docx finds its header and footer templates as "parts/../templates";
+# the "parts" folder must exist on disk for that path to resolve.
+datas += collect_data_files("docx", include_py_files=True)
+binaries += collect_dynamic_libs("streamlit")
+for package in ("cv2", "pypdfium2", "pypdfium2_raw"):
+    try:
+        binaries += collect_dynamic_libs(package)
+    except Exception:
+        pass
 
 for distribution in (
-    "streamlit",
-    "altair",
-    "pandas",
-    "pyarrow",
-    "pillow",
-    "pymupdf",
-    "pdfplumber",
-    "python-docx",
-    "openpyxl",
+    "streamlit", "altair", "pandas", "pyarrow", "pillow", "pymupdf", "pdfplumber", "pdfminer.six",
+    "python-docx", "openpyxl", "fonttools", "img2table", "opencv-contrib-python", "pypdfium2",
+    "numpy", "thefuzz", "rapidfuzz",
 ):
     try:
         datas += copy_metadata(distribution)
@@ -141,7 +128,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=["packaging/runtime_hook.py"],
-    excludes=["pytest", "IPython"],
+    excludes=["pytest", "IPython", "matplotlib.tests", "numpy.tests"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)
@@ -151,7 +138,8 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="PDF Tool",
+    name="PDF Converter",
+    icon="packaging/icon.ico",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -172,5 +160,5 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=False,
-    name="PDF Tool",
+    name="PDF Converter",
 )

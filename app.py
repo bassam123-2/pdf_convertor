@@ -508,6 +508,40 @@ _HERO = """
 """
 
 
+_HERO_WORD = """
+<section class="hero">
+  <div class="hero-copy">
+    <p class="hero-kicker">PDF Converter</p>
+    <h1>PDF إلى وورد</h1>
+    <p class="lead">حوّل ملف PDF إلى مستند وورد تقدر تعدّل عليه: فقرات، عناوين، جداول وصور، بالعربي والإنجليزي. كل شيء يتم على هذا الجهاز، ولا يُرفع أي ملف إلى الإنترنت.</p>
+    <ul class="pills">
+      <li>عربي وإنجليزي</li>
+      <li>جداول قابلة للتعديل</li>
+      <li>يعمل من غير إنترنت</li>
+    </ul>
+  </div>
+  <div class="hero-side">
+    <div class="sheet">
+      <b>ماذا تستلم</b>
+      <i>فقرات وعناوين قابلة للتعديل</i>
+      <i>جداول حقيقية، والصور في أماكنها</i>
+      <i>هيدر وفوتر مثل الأصل</i>
+    </div>
+  </div>
+</section>
+"""
+
+# In the app window there is no browser around the page: Streamlit's own bar,
+# its "running" figure and the page margin above the card are taken away.
+_DESKTOP_CSS = """
+<style>
+[data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stStatusWidget"],
+[data-testid="stDecoration"], [data-testid="stAppDeployButton"] { display: none !important; }
+.block-container { padding-top: 1.4rem !important; }
+</style>
+"""
+
+
 def _arabic_error(exc: BaseException) -> str:
     text = str(exc).strip()
     lowered = text.lower()
@@ -3683,10 +3717,25 @@ def _show_excel_result() -> None:
 
 
 
+def _desktop() -> bool:
+    """Running inside the Windows app window (desktop_app.pyw)."""
+    return os.environ.get("PDF_TOOL_DESKTOP") == "1"
+
+
+def _excel_hidden() -> bool:
+    """The Excel tab is still being finished; the Windows app leaves it out."""
+    return os.environ.get("PDF_TOOL_HIDE_EXCEL") == "1"
+
+
+def _page_icon():
+    path = _Path(__file__).resolve().parent / "packaging" / "icon.png"
+    return str(path) if path.is_file() else "📄"
+
+
 def main() -> None:
     st.set_page_config(
-        page_title="محوّل PDF إلى وورد وإكسل",
-        page_icon="📄",
+        page_title="PDF Converter" if _desktop() else "محوّل PDF إلى وورد وإكسل",
+        page_icon=_page_icon(),
         layout="wide",
         initial_sidebar_state="collapsed",
         menu_items={
@@ -3696,7 +3745,9 @@ def main() -> None:
         },
     )
     st.markdown(_CSS, unsafe_allow_html=True)
-    st.markdown(_HERO, unsafe_allow_html=True)
+    if _desktop():
+        st.markdown(_DESKTOP_CSS, unsafe_allow_html=True)
+    st.markdown(_HERO_WORD if _excel_hidden() else _HERO, unsafe_allow_html=True)
     try:
         from engine.ocr_status import describe
         from engine.version import VERSION
@@ -3715,11 +3766,14 @@ def main() -> None:
         st.error("تعذّر تحميل أدوات التحويل. ثبّت المتطلبات ثم أعد تشغيل التطبيق: pip install -r requirements.txt")
         st.exception(_IMPORT_ERROR)
         return
-    word_tab, excel_tab = st.tabs(["PDF إلى وورد", "PDF إلى إكسل"])
-    with word_tab:
+    if _excel_hidden():
         _render_word()
-    with excel_tab:
-        _render_excel()
+    else:
+        word_tab, excel_tab = st.tabs(["PDF إلى وورد", "PDF إلى إكسل"])
+        with word_tab:
+            _render_word()
+        with excel_tab:
+            _render_excel()
     st.markdown(
         '<p class="foot">تُعالج الملفات على هذا الجهاز.</p>',
         unsafe_allow_html=True,
