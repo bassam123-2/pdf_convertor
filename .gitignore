@@ -4,3 +4,4 @@ tests/corpus/_quality/
 .extract_cache/
 output_preview/
 outputs/
+tests/corpus/_similarity_tmp/
