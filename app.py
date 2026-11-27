@@ -2791,15 +2791,17 @@ def _mark_scanned(result: dict, cluster: dict, display_len: int, offset: int) ->
 
 
 def _scroll_to_cluster() -> None:
-    st.components.v1.html(
-        """
+    script = """
         <script>
         const node = window.parent.document.getElementById("cluster-top");
         if (node) { node.scrollIntoView({block: "start"}); }
         </script>
-        """,
-        height=0,
-    )
+        """
+    # st.iframe replaces st.components.v1.html in newer Streamlit releases.
+    if hasattr(st, "iframe"):
+        st.iframe(script, height=1)
+    else:
+        st.components.v1.html(script, height=0)
 
 
 def _cluster_across(field: str, count: int) -> int:

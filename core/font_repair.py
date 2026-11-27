@@ -23,9 +23,14 @@ a healthy font is left exactly as it was.
 from __future__ import annotations
 
 import io
+import logging
 import os
 import re
 import sys
+
+# Many installed fonts carry a few spare bytes in their "post" table; fontTools
+# reports each one ("2 extra bytes in post.stringData array"). Harmless.
+logging.getLogger("fontTools.ttLib.tables._p_o_s_t").setLevel(logging.ERROR)
 from dataclasses import dataclass, field
 from pathlib import Path
 

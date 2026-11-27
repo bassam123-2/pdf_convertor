@@ -723,9 +723,12 @@ def export_crop_library() -> bytes:
     root = crop_library_dir()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("index.json", json.dumps(_read_library_index(), ensure_ascii=False, indent=2))
+        written: set[str] = set()
         for item in _read_library_index():
             path = root / str(item.get("file") or "")
-            if path.is_file():
+            # One crop can back several index entries; it goes in once.
+            if path.is_file() and path.name not in written:
+                written.add(path.name)
                 archive.write(path, arcname=path.name)
     return buffer.getvalue()
 
