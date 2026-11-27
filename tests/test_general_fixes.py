@@ -492,3 +492,54 @@ def test_page_check_reports_kept_and_doubled_words(tmp_path):
     assert score(page, good, 1).recall == 1.0 and not score(page, good, 1).weak
     assert score(page, half, 1).weak
     assert score(page, twice, 1).weak
+
+
+# --- pages with no text layer ("Print to PDF", scans) -------------------------
+
+
+def test_picture_beside_text_becomes_one_row(tmp_path):
+    from core.docx_converter import ImageBlock
+    from core.flow_layout import _media_rows
+
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 40, 30), False)
+    pix.clear_with(120)
+    picture = ImageBlock((40, 100, 170, 190), pix.tobytes("png"), 130, 90)
+    lines = [
+        TextBlock("heading", (200, 100, 550, 115), "A headline about the item", 12, True),
+        TextBlock("paragraph", (200, 120, 550, 132), "The first line of the text that sits beside it", 10),
+        TextBlock("paragraph", (200, 134, 550, 146), "and the second line of the same paragraph here", 10),
+    ]
+    out = _media_rows(page, [picture, *lines])
+    assert len(out) == 1 and type(out[0]).__name__ == "TableBlock"
+    assert out[0].images and out[0].images[0][1] == 0
+    assert "headline" in out[0].rows[0][1] and "second line" in out[0].rows[0][1]
+
+
+def test_pictures_repeated_on_every_page_leave_the_flow(tmp_path):
+    from core.docx_converter import ImageBlock, _without_running_pictures
+
+    doc = fitz.open()
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 50, 10), False)
+    pix.clear_with(200)
+    for _ in range(4):
+        sheet = doc.new_page(width=595, height=842)
+        sheet.insert_image(fitz.Rect(40, 780, 560, 820), stream=pix.tobytes("png"), keep_proportion=False)
+    path = tmp_path / "bars.pdf"
+    doc.save(path)
+    doc = fitz.open(path)
+    bar = ImageBlock((40, 780, 560, 820), b"x", 520, 40)
+    photo = ImageBlock((40, 100, 300, 300), b"x", 260, 200)
+    kept = _without_running_pictures(doc[1], [bar, photo])
+    assert kept == [photo]
+
+
+def test_rows_may_end_at_a_column_of_coloured_cells():
+    from core.table_rebuild import _row_rule_beside_cells
+
+    frame = (100.0, 50.0, 500.0)
+    fills = [(120.0, 420.0, 500.0)]
+    assert _row_rule_beside_cells((120.0, 50.0, 420.0), frame, fills)
+    assert not _row_rule_beside_cells((160.0, 50.0, 420.0), frame, fills)
+    assert not _row_rule_beside_cells((120.0, 200.0, 300.0), frame, fills)

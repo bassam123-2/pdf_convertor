@@ -1326,6 +1326,29 @@ def _merge_segments(segments: list[tuple[float, float, float]], tolerance: float
     return [tuple(line) for line in merged]
 
 
+def _row_rule_beside_cells(line: tuple, frame: tuple, fill_edges: list) -> bool:
+    """
+    True when a rule covers most of a table's width and the rest of the row
+    is a column of filled cells that begin or end at the rule's height.
+    """
+    y, x0, x1 = line
+    width = frame[2] - frame[1]
+    if width <= 0 or x1 - x0 < width * 0.6:
+        return False
+    if abs(x0 - frame[1]) <= 6:
+        gap = (x1, frame[2])
+    elif abs(x1 - frame[2]) <= 6:
+        gap = (frame[1], x0)
+    else:
+        return False
+    if gap[1] - gap[0] < 10:
+        return True
+    for edge_y, left, right in fill_edges:
+        if abs(edge_y - y) <= 4 and min(right, gap[1]) - max(left, gap[0]) >= (gap[1] - gap[0]) * 0.6:
+            return True
+    return False
+
+
 def rule_grids(page: fitz.Page) -> list[tuple[list[float], list[float], list[list[tuple[int, int]]]]]:
     """
     Tables whose drawn borders close every row: (column edges, row edges, cells).
@@ -1347,6 +1370,10 @@ def rule_grids(page: fitz.Page) -> list[tuple[list[float], list[float], list[lis
         if lines and abs(h[0] - lines[-1][0]) <= 2.0 and abs(h[1] - lines[-1][1]) <= 6 and abs(h[2] - lines[-1][2]) <= 6:
             continue
         lines.append(h)
+    fill_edges = []
+    for rect, _colour in _filled_boxes(page):
+        fill_edges.append((rect.y0, rect.x0, rect.x1))
+        fill_edges.append((rect.y1, rect.x0, rect.x1))
 
     def edges_in(top: float, bottom: float, left: float, right: float) -> list[float]:
         need = (bottom - top) * 0.8
@@ -1369,9 +1396,15 @@ def rule_grids(page: fitz.Page) -> list[tuple[list[float], list[float], list[lis
         bands: list[list[float]] = []
         for j in range(i + 1, len(lines)):
             top, nxt = run[-1], lines[j]
-            if abs(nxt[1] - top[1]) > 6 or abs(nxt[2] - top[2]) > 6:
-                # A shorter rule inside a cell.
-                continue
+            frame = run[0]
+            if abs(nxt[1] - frame[1]) > 6 or abs(nxt[2] - frame[2]) > 6:
+                if not _row_rule_beside_cells(nxt, frame, fill_edges):
+                    # A shorter rule inside a cell.
+                    continue
+                # A rule that stops at a column of coloured cells: those
+                # cells end at the same height, so the row ends there.
+                nxt = (nxt[0], frame[1], frame[2])
+            top = (top[0], frame[1], frame[2])
             if nxt[0] - top[0] < 6:
                 # A doubled border: the same rule again.
                 used.add(j)
@@ -1399,6 +1432,8 @@ def rule_grids(page: fitz.Page) -> list[tuple[list[float], list[float], list[lis
                 continue
             if abs(line[1] - run[0][1]) <= 6 and abs(line[2] - run[0][2]) <= 6:
                 continue
+            if _row_rule_beside_cells(line, run[0], fill_edges):
+                continue
             for k in range(len(columns) - 1):
                 span = columns[k + 1] - columns[k]
                 if min(line[2], columns[k + 1]) - max(line[1], columns[k]) >= span * 0.9:
@@ -1407,6 +1442,21 @@ def rule_grids(page: fitz.Page) -> list[tuple[list[float], list[float], list[lis
             if merged_down:
                 break
         if merged_down:
+            continue
+        # A coloured cell against the grid's side, outside it, means the
+        # table goes on past these borders (a merged label column); this
+        # reader would cut that column off.
+        left, right = columns[0], columns[-1]
+        top_y, bottom_y = run[0][0], run[-1][0]
+        outside = False
+        for rect, _colour in _filled_boxes(page):
+            shared = min(rect.y1, bottom_y) - max(rect.y0, top_y)
+            if shared < min(rect.height, bottom_y - top_y) * 0.5:
+                continue
+            if abs(rect.x1 - left) <= 4 and rect.x0 < left - 8 or abs(rect.x0 - right) <= 4 and rect.x1 > right + 8:
+                outside = True
+                break
+        if outside:
             continue
         rows_y = [line[0] for line in run]
         cells = []

@@ -763,6 +763,13 @@ def _drawing_paints(page: fitz.Page) -> list[tuple]:
             continue
         if red > 242 and green > 242 and blue > 242:
             continue
+        items = drawing.get("items") or []
+        if len(items) > 1 and all(item[0] == "re" for item in items):
+            # Several rectangles in one path (three cell borders): each is
+            # its own shape; their joint box is not a bar.
+            rects = [fitz.Rect(item[1]) for item in items]
+            if any(min(r.width, r.height) < 3.0 for r in rects):
+                continue
         area = max(0.0, float(rect.x1) - float(rect.x0)) * max(0.0, float(rect.y1) - float(rect.y0))
         if area < 20:
             continue
@@ -1005,6 +1012,7 @@ def _rule_tables(page: fitz.Page, atoms: list[_Atom]) -> list[TableBlock]:
             styles=styles,
             aligns=aligns,
         ))
+        blocks[-1].row_edges = list(rows_y)
     return blocks
 
 
@@ -1801,7 +1809,146 @@ def _recognize_png_tesseract(data: bytes):
         key = (parts[2], parts[3], parts[4])
         box = _OcrBox(float(parts[6]), float(parts[7]), float(parts[8]), float(parts[9]))
         lines.setdefault(key, []).append(_OcrWord(text, box))
+    _reread_latin_in_arabic(data, list(lines.values()), exe, tessdata)
+    _fill_line_gaps(data, list(lines.values()), exe, tessdata, langs)
     return _OcrResult([_OcrLine(words) for words in lines.values()])
+
+
+def _fill_line_gaps(data: bytes, lines: list, exe: str, tessdata: str, langs: str) -> None:
+    """
+    Read again the holes inside a line where the reader returned no word.
+
+    Tesseract skips a word now and then (a short one, a bold one); the line
+    then has a wide hole with ink in it. The hole is cut out and read on its
+    own as one line of text, and its words are put back in their place.
+    """
+    import os
+    import subprocess
+    import tempfile
+
+    try:
+        picture = fitz.Pixmap(data)
+        source = picture if picture.n == 3 and not picture.alpha else fitz.Pixmap(fitz.csRGB, picture)
+    except Exception:
+        return
+    holes = []
+    for words in lines:
+        if len(words) < 2:
+            continue
+        ordered = sorted(words, key=lambda w: w.bounding_rect.x)
+        heights = sorted(w.bounding_rect.height for w in ordered)
+        height = heights[len(heights) // 2]
+        top = min(w.bounding_rect.y for w in ordered)
+        bottom = max(w.bounding_rect.y + w.bounding_rect.height for w in ordered)
+        for left, right in zip(ordered, ordered[1:]):
+            start = left.bounding_rect.x + left.bounding_rect.width
+            end = right.bounding_rect.x
+            # Wider than a long space, narrower than a column gutter.
+            if height * 1.2 < end - start < height * 12:
+                holes.append((words, int(start + 2), int(top), int(end - 2), int(bottom)))
+    if not holes or len(holes) > 60:
+        return
+    samples = source.samples
+    stride = source.stride
+    channels = source.n
+
+    def inked(x0: int, y0: int, x1: int, y1: int) -> bool:
+        dark = 0
+        for y in range(max(0, y0), min(source.height, y1), 2):
+            row = y * stride
+            for x in range(max(0, x0), min(source.width, x1), 2):
+                if samples[row + x * channels] < 110:
+                    dark += 1
+                    if dark >= 12:
+                        return True
+        return False
+
+    with tempfile.TemporaryDirectory(prefix="pdf_tool_hole_") as work:
+        for index, (words, x0, y0, x1, y1) in enumerate(holes):
+            if not inked(x0, y0, x1, y1):
+                continue
+            pad = max(4, (y1 - y0) // 3)
+            clip = fitz.IRect(x0 - pad, y0 - pad, x1 + pad, y1 + pad) & fitz.IRect(0, 0, source.width, source.height)
+            if clip.is_empty:
+                continue
+            try:
+                cut = fitz.Pixmap(fitz.csRGB, clip, False)
+                cut.copy(source, clip)
+                path = os.path.join(work, f"h{index}.png")
+                cut.save(path)
+                done = subprocess.run(
+                    [exe, path, "stdout", "-l", langs, "--psm", "7"],
+                    capture_output=True, text=True, encoding="utf-8",
+                    env=dict(os.environ, TESSDATA_PREFIX=tessdata), timeout=30,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except Exception:
+                continue
+            found = [token for token in (done.stdout or "").split() if token.strip()]
+            line_arabic = sum(1 for word in words if _arabic_count(word.text)) * 2 >= len(words)
+            if line_arabic:
+                found = [token for token in found if _arabic_count(token) or re.fullmatch(r"[\d.,:%()\-]+", token)]
+            if not found or len(found) > 6:
+                continue
+            # Arabic runs right to left: the first word read sits at the right.
+            if line_arabic:
+                found = found[::-1]
+            step = (x1 - x0) / len(found)
+            for k, token in enumerate(found):
+                words.append(_OcrWord(token, _OcrBox(x0 + k * step, y0, step * 0.9, y1 - y0)))
+
+
+def _reread_latin_in_arabic(data: bytes, lines: list, exe: str, tessdata: str) -> None:
+    """
+    Read again, in Arabic only, a "Latin" word inside an Arabic line.
+
+    With both models loaded, Tesseract now and then takes an Arabic word for
+    Latin letters ("dale" for غرامة). Such a word is cut out of the picture
+    and read with the Arabic model alone; the Arabic reading replaces it.
+    """
+    import os
+    import subprocess
+    import tempfile
+
+    suspects = []
+    for words in lines:
+        arabic = sum(1 for word in words if _arabic_count(word.text))
+        if arabic * 2 < len(words):
+            continue
+        for word in words:
+            if not _arabic_count(word.text) and re.search(r"[A-Za-z]{2,}", word.text):
+                suspects.append(word)
+    if not suspects or len(suspects) > 40:
+        return
+    try:
+        picture = fitz.Pixmap(data)
+        source = picture if picture.n == 3 and not picture.alpha else fitz.Pixmap(fitz.csRGB, picture)
+    except Exception:
+        return
+    with tempfile.TemporaryDirectory(prefix="pdf_tool_word_") as work:
+        for index, word in enumerate(suspects):
+            box = word.bounding_rect
+            pad = max(4.0, box.height * 0.3)
+            clip = fitz.IRect(int(box.x - pad), int(box.y - pad), int(box.x + box.width + pad), int(box.y + box.height + pad))
+            clip &= fitz.IRect(0, 0, picture.width, picture.height)
+            if clip.is_empty:
+                continue
+            try:
+                cut = fitz.Pixmap(fitz.csRGB, clip, False)
+                cut.copy(source, clip)
+                path = os.path.join(work, f"w{index}.png")
+                cut.save(path)
+                done = subprocess.run(
+                    [exe, path, "stdout", "-l", "ara", "--psm", "8"],
+                    capture_output=True, text=True, encoding="utf-8",
+                    env=dict(os.environ, TESSDATA_PREFIX=tessdata), timeout=30,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except Exception:
+                continue
+            text = (done.stdout or "").strip()
+            if text and _arabic_count(text) >= max(2, len(text.replace(" ", "")) * 0.6):
+                word.text = text
 
 
 def _recognize_png_windows(data: bytes):
@@ -2121,7 +2268,7 @@ def _ocr_word_atoms(page: fitz.Page, clip: fitz.Rect | None = None) -> list[_Ato
     if result is None:
         return []
     words = []
-    for line in result.lines:
+    for line_index, line in enumerate(result.lines):
         for item in line.words:
             text = plain_arabic(getattr(item, "text", "") or "")
             text = "".join(
@@ -2163,23 +2310,33 @@ def _ocr_word_atoms(page: fitz.Page, clip: fitz.Rect | None = None) -> list[_Ato
                 0x0621 <= ord(char) <= 0x064A or 0x0671 <= ord(char) <= 0x06D3 for char in text
             ):
                 continue
-            words.append((text, x0, y0, x1, y1))
+            words.append((text, x0, y0, x1, y1, line_index))
     if not words:
         return []
-    words.sort(key=lambda item: ((item[2] + item[4]) / 2.0, item[1]))
-    bands: list[list] = []
+    # The reader's own lines: words of one printed line share its baseline,
+    # and a header line just above is not pulled into it. A reader line that
+    # spans two printed lines (rare) is split where the words sit apart.
+    by_line: dict[int, list] = {}
     for word in words:
-        center = (word[2] + word[4]) / 2.0
-        height = max(8.0, word[4] - word[2])
-        if bands and abs(center - bands[-1][0]) <= max(6.0, height * 0.45):
-            bands[-1][1].append(word)
-        else:
-            bands.append((center, [word]))
+        by_line.setdefault(word[5], []).append(word)
+    bands: list[tuple] = []
+    for line_words in by_line.values():
+        line_words.sort(key=lambda item: (item[2] + item[4]) / 2.0)
+        for word in line_words:
+            center = (word[2] + word[4]) / 2.0
+            height = max(8.0, word[4] - word[2])
+            if bands and bands[-1][2] == word[5] and abs(center - bands[-1][0]) <= max(6.0, height * 0.6):
+                bands[-1][1].append(word)
+            else:
+                bands.append((center, [word], word[5]))
+    bands.sort(key=lambda band: band[0])
     sizes = _trace_sizes(page)
     atoms: list[_Atom] = []
-    for _center, band in bands:
-        baseline = max(word[4] for word in band)
-        for text, x0, y0, x1, y1 in band:
+    for _center, band, _index in bands:
+        baseline = sorted(word[4] for word in band)[len(band) // 2]
+        heights = sorted(word[4] - word[2] for word in band)
+        line_size = max(6.0, round(heights[len(heights) // 2] * 0.8 * 2) / 2)
+        for text, x0, y0, x1, y1, _line in band:
             arabic = _arabic_count(text) > 0 or any(char in "،؛؟\"'«»“”" for char in text)
             atoms.append(
                 _Atom(
@@ -2191,7 +2348,7 @@ def _ocr_word_atoms(page: fitz.Page, clip: fitz.Rect | None = None) -> list[_Ato
                     x0,
                     baseline,
                     1 if arabic else 0,
-                    _size_near(sizes, (y0 + y1) / 2.0, max(8.0, y1 - y0)),
+                    _size_near(sizes, (y0 + y1) / 2.0, line_size) if sizes else line_size,
                     False,
                     _color_near(sizes, (y0 + y1) / 2.0),
                 )
@@ -6692,13 +6849,168 @@ def _capture_flow(
             flows, why = page_flows_well(page, payload)
             if flows:
                 notes.extend(payload.notes)
-                blocks = blocks_from_faithful(page, payload)
+                blocks = _without_running_pictures(page, blocks_from_faithful(page, payload))
                 return WordPage(page_number, blocks, width, height, kind="digital")
             # Positioned layout for this page, so nothing that only the page
             # picture carries is lost and the page stays one page.
             notes.append(f"Page {page_number}: kept in the positioned layout ({why}).")
             return _positioned(fallback, page, plumber_page, background_xrefs, furniture, schema, page_number, notes, options, repair)
+    if not digital_layer and not (page_number == 1 and options.preserve_first_page):
+        # No text layer: a scan, or a page printed with "Print to PDF" whose
+        # letters are drawn as shapes. Its words are read from the page
+        # picture and flow as paragraphs; its photos stay photos.
+        try:
+            payload = faithful.read_page(page, repair, background=False, from_picture=True)
+        except Exception:
+            payload = None
+        if payload is not None and len(payload.lines) >= 3:
+            notes.append(f"Page {page_number}: no text layer; its words were read from the page picture.")
+            notes.extend(payload.notes)
+            blocks = _without_running_pictures(page, blocks_from_faithful(page, payload))
+            blocks = _with_picture_tables(page, blocks)
+            return WordPage(page_number, blocks, width, height, kind="scan")
     return _positioned(fallback or _capture_page, page, plumber_page, background_xrefs, furniture, schema, page_number, notes, options, repair)
+
+
+def _with_picture_tables(page, blocks: list) -> list:
+    """
+    Tables drawn on a page that has no text layer, read cell by cell from
+    the page picture; the paragraphs and pictures they cover leave the flow.
+
+    A table whose borders are drawn is read from those borders, with the
+    words the picture reader found in each cell; a cell it left empty
+    (white words on a coloured cell) is read again on its own. Other ruled
+    tables are found in the picture itself.
+    """
+    tables: list = []
+    try:
+        from core.faithful import page_reading
+
+        words = page_reading(page, from_picture=True).letters
+        tables = _rule_tables(page, words)
+        for table in tables:
+            _read_empty_cells(page, table)
+    except Exception:
+        tables = []
+    try:
+        tables += [t for t in _picture_tables(page, tables) if not _covers_any(t.bbox, tables)]
+    except Exception:
+        pass
+    if not tables:
+        return blocks
+    kept = []
+    for block in blocks:
+        box = fitz.Rect(block.bbox)
+        centre = fitz.Point((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2)
+        if any(fitz.Rect(table.bbox).contains(centre) for table in tables):
+            continue
+        kept.append(block)
+    kept.extend(tables)
+    kept.sort(key=lambda block: (block.bbox[1], -block.bbox[2]))
+    return kept
+
+
+def _read_empty_cells(page, table) -> None:
+    """Read each empty cell of a table on its own from the page picture."""
+    if not table.widths or not table.rows:
+        return
+    try:
+        from core.image_tables import _tesseract_text, tessdata_for
+    except Exception:
+        return
+    _folder, langs = tessdata_for()
+    if not langs:
+        return
+    import tempfile
+
+    x0, y0, x1, y1 = table.bbox
+    # Row edges are not kept on the block; spread the rows by their text.
+    rows = len(table.rows)
+    edges_y = getattr(table, "row_edges", None) or [y0 + (y1 - y0) * k / rows for k in range(rows + 1)]
+    edges_x = [x0]
+    for width in table.widths:
+        edges_x.append(edges_x[-1] + width)
+    with tempfile.TemporaryDirectory(prefix="pdf_tool_cell_") as work:
+        for r, row in enumerate(table.rows):
+            for c, text in enumerate(row):
+                if text or c + 1 >= len(edges_x) or r + 1 >= len(edges_y):
+                    continue
+                spans = (table.spans or [[]] * rows)[r] if table.spans else []
+                if spans and not any(first == c for first, _last in spans):
+                    continue  # covered by the cell to its left
+                last = next((l for f, l in spans if f == c), c)
+                clip = fitz.Rect(edges_x[c] + 1, edges_y[r] + 1, edges_x[last + 1] - 1, edges_y[r + 1] - 1)
+                if clip.width < 8 or clip.height < 6:
+                    continue
+                try:
+                    pixmap = page.get_pixmap(matrix=fitz.Matrix(4, 4), clip=clip, alpha=False)
+                    picked = pixmap.samples[:: max(1, len(pixmap.samples) // 900)]
+                    if picked and sum(picked) / len(picked) < 150:
+                        pixmap.invert_irect(pixmap.irect)  # light words on a dark cell
+                    path = f"{work}/c{r}_{c}.png"
+                    pixmap.save(path)
+                    found = _tesseract_text(path, langs).strip()
+                except Exception:
+                    found = ""
+                if found:
+                    found = plain_arabic(" ".join(found.split()))
+                    table.rows[r][c] = found
+                    if table.styles is not None:
+                        table.styles.pop((r, c), None)
+
+
+_RUNNING: dict[tuple, list] = {}
+
+
+def _running_picture_boxes(document) -> list:
+    """
+    Picture boxes printed at the same place on most pages.
+
+    A web page printed to PDF repeats its floating bars (a search box, a
+    player) on every sheet; a report repeats a banner. They are the page's
+    furniture, not its content, and in the flowing layout they would show
+    up between paragraphs on every page.
+    """
+    key = (id(document), getattr(document, "name", ""))
+    if key in _RUNNING:
+        return _RUNNING[key]
+    counts: dict[tuple, int] = {}
+    pages = document.page_count
+    for page in document:
+        seen = set()
+        try:
+            infos = page.get_image_info() or []
+        except Exception:
+            infos = []
+        for info in infos:
+            box = info.get("bbox")
+            if not box:
+                continue
+            spot = tuple(int(round(float(v) / 4.0)) for v in box)
+            if spot not in seen:
+                seen.add(spot)
+                counts[spot] = counts.get(spot, 0) + 1
+    running = [
+        fitz.Rect(*(v * 4.0 for v in spot))
+        for spot, count in counts.items()
+        if pages >= 3 and count >= max(3, pages * 0.6)
+    ]
+    _RUNNING[key] = running
+    return running
+
+
+def _without_running_pictures(page, blocks: list) -> list:
+    running = _running_picture_boxes(page.parent)
+    if not running:
+        return blocks
+    kept = []
+    for block in blocks:
+        if isinstance(block, ImageBlock):
+            box = fitz.Rect(block.bbox)
+            if any(abs(box.x0 - r.x0) <= 6 and abs(box.y0 - r.y0) <= 6 and abs(box.x1 - r.x1) <= 6 and abs(box.y1 - r.y1) <= 6 for r in running):
+                continue
+        kept.append(block)
+    return kept
 
 
 def _positioned(reader, page, plumber_page, background_xrefs, furniture, schema, page_number, notes, options, repair) -> WordPage:

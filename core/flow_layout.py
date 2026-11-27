@@ -388,15 +388,19 @@ def blocks_from_faithful(page, payload) -> list:
 
     blocks: list = []
     table_boxes = []
+    picture_boxes = []
     for table in getattr(payload, "tables", None) or []:
         rows = [list(row) for row in (getattr(table, "rows", None) or [])]
         if not rows:
             continue
         box = tuple(float(v) for v in table.bbox)
-        table_boxes.append(box)
         if getattr(table, "fallback_png", None) and not getattr(table, "usable", True):
+            # Kept as its picture: only words printed on the picture belong
+            # to it, not a caption just under it.
+            picture_boxes.append(box)
             blocks.append(ImageBlock(box, table.fallback_png, box[2] - box[0], box[3] - box[1], "center"))
             continue
+        table_boxes.append(box)
         sizes = sorted(
             float(line.size) for line in payload.lines
             if box[0] <= (line.x0 + line.x1) / 2 <= box[2] and box[1] <= (line.y0 + line.y1) / 2 <= box[3]
@@ -424,6 +428,8 @@ def blocks_from_faithful(page, payload) -> list:
         # A cell's first line can start a little above the drawn cell.
         cx, cy = (line.x0 + line.x1) / 2.0, (line.y0 + line.y1) / 2.0
         reach = max(4.0, (line.y1 - line.y0) * 0.8)
+        if any(b[0] <= cx <= b[2] and b[1] <= cy <= b[3] for b in picture_boxes):
+            return True
         return any(b[0] - 2 <= cx <= b[2] + 2 and b[1] - reach <= cy <= b[3] + reach for b in table_boxes)
 
     for line in payload.lines:
@@ -488,7 +494,7 @@ def blocks_from_faithful(page, payload) -> list:
         if rect.get_area() / page_area > 0.85:
             continue  # a page-sized backdrop or scan, not a figure
         # A picture a table was read from is replaced by that table.
-        if any((fitz.Rect(t) & rect).get_area() >= rect.get_area() * 0.6 for t in table_boxes):
+        if any((fitz.Rect(t) & rect).get_area() >= rect.get_area() * 0.6 for t in table_boxes + picture_boxes):
             continue
         if _decoration(page, tuple(float(v) for v in box)):
             continue  # page decoration under the text: the flow has no backdrop
@@ -515,9 +521,99 @@ def blocks_from_faithful(page, payload) -> list:
                 continue
         blocks.append(ImageBlock((rect.x0, rect.y0, rect.x1, rect.y1), data, rect.width, rect.height, "center"))
     blocks = _vector_figures(page, blocks)
+    blocks = _media_rows(page, blocks)
     _line_pitch(blocks)
     _set_alignment(blocks, float(page.rect.width))
     return blocks
+
+
+def _media_rows(page, blocks: list) -> list:
+    """
+    A picture with its text beside it (a news item, a profile, a product)
+    becomes one row of two cells: the picture in one, the text in the other.
+
+    The flow writes blocks one under another, so the picture would land
+    above its text and the page would grow. A borderless two-cell row keeps
+    them side by side as printed, and both stay editable.
+    """
+    from core.docx_converter import TableBlock
+
+    width = float(page.rect.width)
+    texts = [b for b in blocks if _kind(b) == "text" and getattr(b, "role", "") != "toc"]
+    used: set[int] = set()
+    rows = []
+    for image in [b for b in blocks if _kind(b) == "image"]:
+        ix0, iy0, ix1, iy1 = _box(image)
+        if not (60 <= ix1 - ix0 <= width * 0.45 and iy1 - iy0 >= 40):
+            continue
+        beside = []
+        for block in texts:
+            if id(block) in used:
+                continue
+            x0, y0, x1, y1 = _box(block)
+            middle = (y0 + y1) / 2
+            if not (iy0 - 12 <= middle <= iy1 + 4):
+                continue
+            if min(x1, ix1) - max(x0, ix0) > 2:
+                continue  # over or under the picture, not beside it
+            beside.append(block)
+        if not beside:
+            continue
+        left = [b for b in beside if _box(b)[2] <= ix0 + 2]
+        right = [b for b in beside if _box(b)[0] >= ix1 - 2]
+        side = right if len(right) >= len(left) else left
+        if len(side) < 2 or sum(len(getattr(b, "text", "") or "") for b in side) < 40:
+            continue
+        side.sort(key=lambda b: _box(b)[1])
+        # Lines of one paragraph are joined; a gap, a change of weight or
+        # size starts the next one.
+        runs: list[tuple] = []
+        plain: list[str] = []
+        previous = None
+        for block in side:
+            text = (block.text or "").strip()
+            if not text:
+                continue
+            if previous is not None:
+                gap = _box(block)[1] - _box(previous)[3]
+                new = gap > float(previous.size or 10) * 0.9 or bool(block.bold) != bool(previous.bold) or abs(float(block.size or 10) - float(previous.size or 10)) > 1.5
+                runs.append(("\n" if new else " ", False, False, ""))
+                plain.append("\n" if new else " ")
+            runs.append((text, bool(block.bold) or getattr(block, "kind", "") == "heading", False, getattr(block, "color", "") or ""))
+            plain.append(text)
+            previous = block
+        tx0 = min(_box(b)[0] for b in side)
+        tx1 = max(_box(b)[2] for b in side)
+        ty0 = min(_box(b)[1] for b in side)
+        ty1 = max(_box(b)[3] for b in side)
+        box = (min(ix0, tx0), min(iy0, ty0), max(ix1, tx1), max(iy1, ty1))
+        picture_first = ix0 < tx0
+        text_cell = "".join(plain)
+        cells = ["", text_cell] if picture_first else [text_cell, ""]
+        picture_col = 0 if picture_first else 1
+        gap = (tx0 - ix1) if picture_first else (ix0 - tx1)
+        widths = [ix1 - ix0 + max(0.0, gap), tx1 - tx0] if picture_first else [tx1 - tx0, ix1 - ix0 + max(0.0, gap)]
+        sizes = sorted(float(b.size or 10) for b in side)
+        row = TableBlock(
+            box,
+            [cells],
+            [["", ""]],
+            widths=widths,
+            rules=False,
+            images=[(0, picture_col, image.data, ix1 - ix0, iy1 - iy0)],
+            styles={(0, 1 - picture_col): runs},
+            aligns={(0, 1 - picture_col): ("", "top"), (0, picture_col): ("center", "top")},
+        )
+        row.fit_scale = max(0.6, min(1.6, sizes[len(sizes) // 2] / 11.0))
+        rows.append((image, side, row))
+        used.update(id(b) for b in side)
+    if not rows:
+        return blocks
+    drop = {id(image) for image, _side, _row in rows} | used
+    kept = [b for b in blocks if id(b) not in drop]
+    kept.extend(row for _image, _side, row in rows)
+    kept.sort(key=lambda b: (_box(b)[1], -_box(b)[2]))
+    return kept
 
 
 def _vector_figures(page, blocks: list) -> list:

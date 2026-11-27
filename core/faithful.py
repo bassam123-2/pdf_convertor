@@ -239,7 +239,7 @@ def _center(atom: _Atom) -> tuple[float, float]:
     return (atom.x0 + atom.x1) / 2.0, (atom.y0 + atom.y1) / 2.0
 
 
-def _split_band(band: list[_Atom], regions: list[tuple], rules: list[tuple]) -> list[list[_Atom]]:
+def _split_band(band: list[_Atom], regions: list[tuple], rules: list[tuple], gap_ems: float = 2.0) -> list[list[_Atom]]:
     """
     Cut one baseline into the pieces that belong to different blocks.
 
@@ -263,7 +263,7 @@ def _split_band(band: list[_Atom], regions: list[tuple], rules: list[tuple]) -> 
         if last is not None:
             gap = atom.x0 - edge
             size = max(last.size, atom.size, 1.0)
-            if gap >= 2.0 * size:
+            if gap >= gap_ems * size:
                 cut = True
             elif gap >= 0.5 * size and _region_at(regions, *_center(last)) != _region_at(regions, *_center(atom)):
                 cut = True
@@ -1155,7 +1155,60 @@ class PageReading:
 _READINGS: dict[tuple, PageReading] = {}
 
 
-def page_reading(page: fitz.Page, keep_unread: bool = True) -> PageReading:
+def _words_on_dark_boxes(page: fitz.Page, words: list) -> list:
+    """
+    Light words on dark bars (a title banner, a header cell) that the page
+    reader missed: each such bar is cut out, turned light-on-dark into
+    dark-on-light, and read on its own.
+    """
+    import tempfile
+
+    from core.arabic_fixer import plain_arabic
+    from core.docx_converter import _drawing_paints
+    from core.image_tables import _tesseract_text, tessdata_for
+
+    _folder, langs = tessdata_for()
+    if not langs:
+        return []
+    found: list = []
+    boxes = []
+    for x0, y0, x1, y1, colour, area in _drawing_paints(page):
+        try:
+            red, green, blue = int(colour[0:2], 16), int(colour[2:4], 16), int(colour[4:6], 16)
+        except ValueError:
+            continue
+        if red * 0.3 + green * 0.59 + blue * 0.11 >= 150 or area < 300 or y1 - y0 > 80:
+            continue
+        rect = fitz.Rect(x0, y0, x1, y1)
+        if any(rect.contains(fitz.Point((w.x0 + w.x1) / 2, (w.y0 + w.y1) / 2)) for w in words):
+            continue
+        if any(rect.intersects(other) and (rect & other).get_area() > rect.get_area() * 0.5 for other in boxes):
+            continue
+        boxes.append(rect)
+    if len(boxes) > 30:
+        return []
+    with tempfile.TemporaryDirectory(prefix="pdf_tool_bar_") as work:
+        for index, rect in enumerate(boxes):
+            try:
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(4, 4), clip=rect, alpha=False)
+                pixmap.invert_irect(pixmap.irect)
+                path = f"{work}/b{index}.png"
+                pixmap.save(path)
+                text = " ".join(_tesseract_text(path, langs).split())
+            except Exception:
+                text = ""
+            text = " ".join(token for token in plain_arabic(text).split() if re.search(r"\w", token))
+            arabic_letters = sum(1 for char in text if _is_arabic(char))
+            latin_words = re.findall(r"[A-Za-z]{4,}", text)
+            if arabic_letters < 2 and not any(re.search(r"[aeiouAEIOU]", word) for word in latin_words):
+                continue  # pieces of a logo
+            size = max(7.0, min(24.0, rect.height * 0.55))
+            arabic = any(_is_arabic(char) for char in text)
+            found.append(_Atom(f"{text} ", rect.x0 + 2, rect.y0 + 2, rect.x1 - 2, rect.y1 - 2, rect.x0 + 2, rect.y1 - rect.height * 0.3, 1 if arabic else 0, size, True, "FFFFFF"))
+    return found
+
+
+def page_reading(page: fitz.Page, keep_unread: bool = True, from_picture: bool = False) -> PageReading:
     """
     The page's trusted glyphs, shared by the line reader and the table readers.
 
@@ -1164,10 +1217,26 @@ def page_reading(page: fitz.Page, keep_unread: bool = True) -> PageReading:
     """
     from core.docx_converter import _atoms_on_page, _cluster_baselines, _separate_overlapping_atoms
 
-    key = (id(page.parent), getattr(page.parent, "name", ""), page.number, keep_unread)
+    key = (id(page.parent), getattr(page.parent, "name", ""), page.number, keep_unread, from_picture)
     cached = _READINGS.get(key)
     if cached is not None:
         return cached
+    if from_picture:
+        # No text layer (a scan, or "Print to PDF" letters drawn as shapes):
+        # the words are read from the page picture, whole.
+        from core.docx_converter import _ocr_word_atoms
+
+        try:
+            words = _ocr_word_atoms(page)
+        except Exception:
+            words = []
+        try:
+            words += _words_on_dark_boxes(page, words)
+        except Exception:
+            pass
+        reading = PageReading(words, _cluster_baselines(words), [], [], set(), len(words), 0)
+        _READINGS[key] = reading
+        return reading
     atoms = _atoms_on_page(page, upright_only=True)
     before = sum(1 for atom in atoms if atom.text.strip())
     atoms = _separate_overlapping_atoms(_dedupe_fake_bold(atoms))
@@ -1190,7 +1259,153 @@ def page_reading(page: fitz.Page, keep_unread: bool = True) -> PageReading:
     return reading
 
 
-def read_page(page: fitz.Page, repair: str = "", background: bool = True) -> FaithfulPage:
+_JOINED: dict[str, float] = {}
+
+
+def _joined_ratio(family: str) -> float:
+    """
+    How much narrower Arabic is joined than letter by letter, in this family.
+
+    Joined letters drop their tails, so a word is about a quarter narrower
+    than its letters' own widths added up. The family's own ratio is
+    measured once by laying out a sample sentence; 0.75 when it cannot be.
+    """
+    if family in _JOINED:
+        return _JOINED[family]
+    ratio = 0.75
+    try:
+        import tempfile
+
+        from core.font_repair import _family_files, _key_name
+        from core.flow_layout import _advances
+
+        files = _family_files().get(_key_name(family)) or []
+        advances = _advances(family)
+        if files and advances:
+            sample = "فرضت هيئة حماية البيانات الشخصية غرامة على الشركة بسبب وصول التطبيق إلى الصور"
+            css = f"@font-face {{font-family: T; src: url({files[0][0]});}} p {{font-family: T; font-size: 100px; white-space: nowrap;}}"
+            story = fitz.Story(html=f'<p dir="rtl">{sample}</p>', user_css=css, archive=fitz.Archive("/"))
+            with tempfile.TemporaryDirectory() as work:
+                path = f"{work}/m.pdf"
+                writer = fitz.DocumentWriter(path)
+                device = writer.begin_page(fitz.Rect(0, 0, 20000, 400))
+                story.place(fitz.Rect(0, 0, 20000, 400))
+                story.draw(device)
+                writer.end_page()
+                writer.close()
+                with fitz.open(path) as measured:
+                    box = fitz.Rect()
+                    for block in measured[0].get_text("dict")["blocks"]:
+                        box |= fitz.Rect(block["bbox"])
+            alone = sum(advances.get(char, advances.get("\u0628", 0.5)) for char in sample) * 100
+            if alone > 0 and 0.4 < box.width / alone < 1.1:
+                ratio = box.width / alone
+    except Exception:
+        pass
+    _JOINED[family] = ratio
+    return ratio
+
+
+def _sizes_from_widths(lines: list) -> None:
+    """
+    Type sizes for lines read from a picture, from how wide each line is.
+
+    A word's box says little about its size: tall letters and dots change
+    it from word to word. The line's printed width does not: it is the
+    text's width in the output font times the size. Lines of one paragraph
+    (close together, sizes alike) share their middle size, so a paragraph
+    is not set in three sizes.
+    """
+    try:
+        from core.docx_converter import output_fonts
+        from core.flow_layout import _advances
+
+        family = output_fonts()[1] or "Times New Roman"
+        advances = _advances(family) or _advances("Times New Roman")
+    except Exception:
+        advances = None
+    if not advances:
+        return
+    default = advances.get("\u0628", 0.5)
+    joined = _joined_ratio(family)
+    # The letters' height is steady from line to line but says little about
+    # the size in the output font; the width of a long line says that, but
+    # a word the reader missed makes it jump. One scale for the whole page,
+    # taken from its long lines, turns heights into sizes.
+    ratios = []
+    for line in lines:
+        text = (line.text or "").strip()
+        if len(text) < 25:
+            continue
+        em = sum(advances.get(char, default) * (joined if _is_arabic(char) else 1.0) for char in text)
+        base = float(line.size or 10)
+        if em > 0 and base > 0:
+            ratios.append((line.x1 - line.x0) / em / base)
+    scale = sorted(ratios)[len(ratios) // 2] if ratios else 1.0
+    scale = max(0.85, min(1.35, scale))
+    estimates: dict[int, float] = {index: float(line.size or 10) * scale for index, line in enumerate(lines)}
+    order = sorted(range(len(lines)), key=lambda i: lines[i].y0)
+    groups: list[list[int]] = []
+    for index in order:
+        line = lines[index]
+        size = estimates.get(index, float(line.size or 10))
+        if groups:
+            last = lines[groups[-1][-1]]
+            last_size = estimates.get(groups[-1][-1], float(last.size or 10))
+            close = 0 <= line.y0 - last.y0 <= 2.4 * max(size, last_size)
+            alike = abs(size - last_size) <= 0.25 * max(size, last_size)
+            overlap = min(line.x1, last.x1) - max(line.x0, last.x0) > 0
+            if close and alike and overlap:
+                groups[-1].append(index)
+                continue
+        groups.append([index])
+    for group in groups:
+        sizes = sorted(estimates[i] for i in group if i in estimates)
+        if not sizes:
+            continue
+        middle = round(sizes[len(sizes) // 2] * 2) / 2
+        for i in group:
+            lines[i].size = middle
+    # One body size for the page: a line read a little short (a word the
+    # reader missed) must not come out in its own size. The body size is the
+    # size most letters have; lines near it take it.
+    weights: dict[float, int] = {}
+    for line in lines:
+        weights[float(line.size or 10)] = weights.get(float(line.size or 10), 0) + len(line.text or "")
+    if not weights:
+        return
+    body = max(weights, key=weights.get)
+    near = sum(count for size, count in weights.items() if body * 0.8 <= size <= body * 1.25)
+    body = round(sum(size * count for size, count in weights.items() if body * 0.8 <= size <= body * 1.25) / max(1, near) * 2) / 2
+    for line in lines:
+        size = float(line.size or 10)
+        long_line = len(line.text or "") >= 45
+        if body * 0.8 <= size <= body * 1.25 or (long_line and size > body):
+            # A long line is body text: a heading is short. Its letters'
+            # boxes read tall when the reader took the line's whole height.
+            line.size = body
+        elif size > body * 1.25 and len(line.text or "") <= 90:
+            # The picture says nothing about weight; a line clearly larger
+            # than the body text is a heading, and headings are bold.
+            for chunk in line.chunks or []:
+                chunk.bold = True
+
+
+def _picture_page_furniture(payload, height: float) -> None:
+    """
+    Drop the small lines a browser prints at the sheet's edges (the page
+    title and time at the top, the address and page count at the bottom).
+    """
+    kept = []
+    for line in payload.lines:
+        small = float(line.size or 10) <= 7.5
+        if small and (line.y1 <= height * 0.04 or line.y0 >= height * 0.96):
+            continue
+        kept.append(line)
+    payload.lines = kept
+
+
+def read_page(page: fitz.Page, repair: str = "", background: bool = True, from_picture: bool = False) -> FaithfulPage:
     """
     Read one PDF page into a background picture and text lines.
 
@@ -1199,7 +1414,7 @@ def read_page(page: fitz.Page, repair: str = "", background: bool = True) -> Fai
     """
     payload = FaithfulPage(float(page.rect.width), float(page.rect.height))
     number = page.number + 1
-    reading = page_reading(page, keep_unread=not background)
+    reading = page_reading(page, keep_unread=not background, from_picture=from_picture and not background)
     atoms = reading.atoms
     if reading.removed:
         payload.notes.append(
@@ -1221,13 +1436,17 @@ def read_page(page: fitz.Page, repair: str = "", background: bool = True) -> Fai
                 f"Page {number}: {payload.kept_in_picture} glyphs have no usable Unicode value and the picture "
                 "reader could not read them. They stay in the page picture."
             )
-    regions = _fill_regions(page)
-    rules = _vertical_rules(page)
+    # Letters drawn as shapes are filled paths: read as cell fills and rules
+    # they would cut every line into pieces.
+    regions = [] if from_picture else _fill_regions(page)
+    rules = [] if from_picture else _vertical_rules(page)
     payload.column_rules = list(rules)
     reads_left = _page_reads_left(atoms)
     written: list[list[_Atom]] = []
     for band in bands:
-        for part in _split_band(band, regions, rules):
+        # Words read from the picture leave a hole where the reader missed
+        # one; only a column gutter, far wider, cuts such a line.
+        for part in _split_band(band, regions, rules, 5.0 if from_picture else 2.0):
             try:
                 line = _build_line(part, reads_left)
             except Exception:
@@ -1237,6 +1456,9 @@ def read_page(page: fitz.Page, repair: str = "", background: bool = True) -> Fai
             payload.lines.append(line)
             written.append(part)
     payload.lines.sort(key=lambda line: (round(line.baseline, 1), line.x0))
+    if from_picture:
+        _picture_page_furniture(payload, float(page.rect.height))
+        _sizes_from_widths(payload.lines)
     other = _other_text(page)
     if other:
         payload.notes.append(
