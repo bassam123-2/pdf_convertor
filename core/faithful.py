@@ -1264,46 +1264,14 @@ _JOINED: dict[str, float] = {}
 
 def _joined_ratio(family: str) -> float:
     """
-    How much narrower Arabic is joined than letter by letter, in this family.
+    How much narrower Arabic is joined than letter by letter.
 
     Joined letters drop their tails, so a word is about a quarter narrower
-    than its letters' own widths added up. The family's own ratio is
-    measured once by laying out a sample sentence; 0.75 when it cannot be.
+    than its letters' own widths added up (0.76 measured for Times New
+    Roman). Laying out a sample to measure each family was dropped: on
+    Windows, MuPDF's layout of an installed font file could end the process.
     """
-    if family in _JOINED:
-        return _JOINED[family]
-    ratio = 0.75
-    try:
-        import tempfile
-
-        from core.font_repair import _family_files, _key_name
-        from core.flow_layout import _advances
-
-        files = _family_files().get(_key_name(family)) or []
-        advances = _advances(family)
-        if files and advances:
-            sample = "فرضت هيئة حماية البيانات الشخصية غرامة على الشركة بسبب وصول التطبيق إلى الصور"
-            css = f"@font-face {{font-family: T; src: url({files[0][0]});}} p {{font-family: T; font-size: 100px; white-space: nowrap;}}"
-            story = fitz.Story(html=f'<p dir="rtl">{sample}</p>', user_css=css, archive=fitz.Archive("/"))
-            with tempfile.TemporaryDirectory() as work:
-                path = f"{work}/m.pdf"
-                writer = fitz.DocumentWriter(path)
-                device = writer.begin_page(fitz.Rect(0, 0, 20000, 400))
-                story.place(fitz.Rect(0, 0, 20000, 400))
-                story.draw(device)
-                writer.end_page()
-                writer.close()
-                with fitz.open(path) as measured:
-                    box = fitz.Rect()
-                    for block in measured[0].get_text("dict")["blocks"]:
-                        box |= fitz.Rect(block["bbox"])
-            alone = sum(advances.get(char, advances.get("\u0628", 0.5)) for char in sample) * 100
-            if alone > 0 and 0.4 < box.width / alone < 1.1:
-                ratio = box.width / alone
-    except Exception:
-        pass
-    _JOINED[family] = ratio
-    return ratio
+    return _JOINED.get(family, 0.75)
 
 
 def _sizes_from_widths(lines: list) -> None:

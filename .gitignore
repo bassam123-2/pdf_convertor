@@ -5,3 +5,4 @@ tests/corpus/_quality/
 output_preview/
 outputs/
 tests/corpus/_similarity_tmp/
+crash.log

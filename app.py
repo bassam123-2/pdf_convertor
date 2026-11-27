@@ -22,6 +22,34 @@ Streamlit prints a local address, usually http://localhost:8501
 
 from __future__ import annotations
 
+import faulthandler as _faulthandler
+import os as _os
+import sys as _sys
+from pathlib import Path as _Path
+
+
+def _crash_log() -> None:
+    """
+    Keep the trace of a crash inside a library (PyMuPDF, Tesseract).
+
+    Such a crash ends the app with no Python error: the browser just loses
+    the page. The trace goes to crash.log next to the app (or in the app's
+    data folder), so the cause can be found.
+    """
+    try:
+        home = _os.environ.get("PDF_TOOL_HOME", "").strip()
+        folder = _Path(home) if home else _Path(__file__).resolve().parent
+        folder.mkdir(parents=True, exist_ok=True)
+        handle = open(folder / "crash.log", "a", encoding="utf-8")
+        _faulthandler.enable(file=handle, all_threads=True)
+        _sys.modules[__name__].__dict__["_CRASH_HANDLE"] = handle
+    except Exception:
+        pass
+
+
+if not _faulthandler.is_enabled():
+    _crash_log()
+
 import base64
 import getpass
 import hashlib
