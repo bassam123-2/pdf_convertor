@@ -41,6 +41,33 @@ def _languages(folder: Path) -> set[str]:
     return {path.stem for path in folder.glob("*.traineddata")}
 
 
+def _quietly(factory, *args, **kwargs):
+    """
+    Build img2table's reader without its banner.
+
+    It runs "tesseract --version" to check the program is there, and that
+    prints the version and library list into the terminal on every start.
+    """
+    import sys
+
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        saved = os.dup(1), os.dup(2)
+        null = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(null, 1)
+        os.dup2(null, 2)
+    except Exception:
+        return factory(*args, **kwargs)
+    try:
+        return factory(*args, **kwargs)
+    finally:
+        os.dup2(saved[0], 1)
+        os.dup2(saved[1], 2)
+        for handle in (null, *saved):
+            os.close(handle)
+
+
 def tessdata_for(wanted: tuple[str, ...] = ("eng", "ara")) -> tuple[str | None, str]:
     """
     A tessdata folder that holds every wanted language, and the "+"-joined list.
@@ -118,7 +145,7 @@ def _reader(langs: str):
         from img2table.ocr import TesseractOCR
 
         tessdata, _all = tessdata_for()
-        _READERS[langs] = TesseractOCR(n_threads=1, lang=langs, tessdata_dir=tessdata)
+        _READERS[langs] = _quietly(TesseractOCR, n_threads=1, lang=langs, tessdata_dir=tessdata)
     except Exception:
         _READERS[langs] = None
     return _READERS[langs]
@@ -146,7 +173,7 @@ def _ocr():
     if not langs:
         return None
     try:
-        _OCR = TesseractOCR(n_threads=1, lang=langs, tessdata_dir=tessdata)
+        _OCR = _quietly(TesseractOCR, n_threads=1, lang=langs, tessdata_dir=tessdata)
     except Exception:
         _OCR = False
         return None
